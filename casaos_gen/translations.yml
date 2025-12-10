@@ -1,0 +1,28 @@
+﻿"API Port":
+  zh_CN: "API 端口"
+  de_DE: "API-Port"
+"Main web interface port":
+  zh_CN: "主 Web 界面端口"
+  de_DE: "Haupt-Weboberflächen-Port"
+"Data directory":
+  zh_CN: "数据目录"
+  de_DE: "Datenverzeichnis"
+"Database password":
+  zh_CN: "数据库密码"
+  de_DE: "Datenbankpasswort"
+"Powerful OCR powered by DeepSeek AI":
+  de_DE: "Leistungsstarkes OCR mit DeepSeek AI"
+  el_GR: "Ισχυρό OCR με DeepSeek AI"
+  en_GB: "Powerful OCR powered by DeepSeek AI"
+  en_US: "Powerful OCR powered by DeepSeek AI"
+  fr_FR: "OCR puissant propulsé par DeepSeek AI"
+  hr_HR: "Moćan OCR napajan DeepSeek AI"
+  it_IT: "OCR potente alimentato da DeepSeek AI"
+  ja_JP: "DeepSeek AI搭載の強力なOCR"
+  ko_KR: "DeepSeek AI 기반 강력한 OCR"
+  nb_NO: "Kraftig OCR drevet av DeepSeek AI"
+  pt_PT: "OCR poderoso alimentado por DeepSeek AI"
+  ru_RU: "Мощный OCR на базе DeepSeek AI"
+  sv_SE: "Kraftfull OCR drivet av DeepSeek AI"
+  tr_TR: "DeepSeek AI ile Güçlü OCR"
+  zh_CN: "DeepSeek AI 驱动的强大 OCR"

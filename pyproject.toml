@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "casaos-gen"
+version = "0.1.0"
+description = "CLI tool that converts docker-compose files into CasaOS-ready multi-language manifests."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "xhang.project" }]
+dependencies = [
+    "openai>=1.51.0",
+    "pydantic>=2.9.2",
+    "PyYAML>=6.0.2",
+    "fastapi>=0.115.5",
+    "uvicorn>=0.32.0",
+    "python-multipart>=0.0.9",
+]
+
+[project.scripts]
+casaos-gen = "casaos_gen.cli:main"
+casaos-gen-web = "casaos_gen.webui:run"
+
+[tool.uv]
+package = true
