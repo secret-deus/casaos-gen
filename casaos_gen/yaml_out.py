@@ -32,9 +32,9 @@ def build_final_compose(
     return compose_out
 
 
-def write_compose_file(data: Dict, path: Path) -> None:
-    yaml_text = yaml.safe_dump(data, sort_keys=False)
-    with path.open("w", encoding="utf-8") as handle:
-        handle.write(yaml_text)
-    logger.info("CasaOS compose written to %s", path)
+def write_compose_file(data: Dict, path: Path) -> None:
+    yaml_text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(yaml_text)
+    logger.info("CasaOS compose written to %s", path)
 

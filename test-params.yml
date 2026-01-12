@@ -1,0 +1,36 @@
+app:
+  store_folder: ''
+  author: CasaOS User
+  developer: fromxiaobai
+  architectures:
+  - amd64
+  - arm64
+  title: test-app
+  tagline: ''
+  description: ''
+  category: Web Server
+  main: web
+  port_map: '8080'
+  scheme: http
+  index: /
+services:
+  web:
+    envs:
+    - container: NGINX_HOST
+      description: ''
+    - container: NGINX_PORT
+      description: ''
+    ports:
+    - container: '80'
+      description: ''
+    volumes:
+    - container: /usr/share/nginx/html
+      description: ''
+  redis:
+    envs: []
+    ports:
+    - container: '6379'
+      description: ''
+    volumes:
+    - container: /data
+      description: ''

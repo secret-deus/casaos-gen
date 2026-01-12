@@ -1,0 +1,28 @@
+name: psitransfer
+
+services:
+  psitransfer:
+    # 1. 镜像名称
+    image: psitrax/psitransfer
+    
+    # 2. 容器名称 (可选但推荐)
+    container_name: psitransfer
+    
+    # 3. 端口映射: 宿主机:容器
+    # -p 0.0.0.0:3000:3000 转换为:
+    ports:
+      - "3000:3000"
+      
+    # 4. 环境变量:
+    # -e PSITRANSFER_ADMIN_PASS=secret 转换为:
+    environment:
+      PSITRANSFER_ADMIN_PASS: secret
+      
+    # 5. 卷映射:
+    # -v $PWD/data:/data 转换为:
+    # 注意: $PWD/data 对应的是 host 宿主机的相对路径 data 目录
+    volumes:
+      - ./data:/data
+      
+    # 6. 重启策略 (可选, 推荐): 当容器退出时，自动重启
+    restart: unless-stopped 

@@ -1,0 +1,10 @@
+app:
+  store_folder: RagFlow        # 你要的 CDN 目录名（大小写按真实目录）
+  author: IceWhaleTech         # GitHub 原作者
+  developer: fromxiaobai       # 可不写，默认就是这个
+  # architectures: [amd64, arm64]  # 可不写，默认就是这两个
+
+  title: RagFlow
+  tagline: Deep document RAG
+  description: |
+    这里写应用介绍（可以先写中文或英文，单语言会自动复制到全部语言）。

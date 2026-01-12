@@ -39,3 +39,6 @@ Thumbs.db
 # uv
 .uv/
 uv.lock
+llm_config.json
+.tmp*
+.casaos-gen/
