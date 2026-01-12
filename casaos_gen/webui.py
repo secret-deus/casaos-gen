@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .compose_normalize import normalize_compose_for_appstore
 from .i18n import DEFAULT_LANGUAGES, load_translation_map, wrap_multilang
 from .models import CasaOSMeta
 from .pipeline import (
@@ -699,6 +700,7 @@ async def export_compose() -> PlainTextResponse:
     compose = STATE.compose_data
     if not compose.get("x-casaos"):
         raise HTTPException(status_code=400, detail="Stage 2 data unavailable. Run Stage 1 first.")
+    compose = normalize_compose_for_appstore(compose)
     yaml_text = yaml.safe_dump(compose, sort_keys=False, allow_unicode=True)
     return PlainTextResponse(yaml_text, media_type="text/yaml")
 

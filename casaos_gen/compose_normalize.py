@@ -47,11 +47,17 @@ def normalize_compose_for_appstore(
     services = data.get("services") or {}
     if isinstance(services, dict):
         app_data_root = build_app_data_root(app_id_var)
+        used_appdata_sources: set[str] = set()
         for name, svc in services.items():
             if not isinstance(svc, dict):
                 continue
             _normalize_service_ports(svc)
-            _normalize_service_volumes(name, svc, app_data_root=app_data_root)
+            _normalize_service_volumes(
+                name,
+                svc,
+                app_data_root=app_data_root,
+                used_appdata_sources=used_appdata_sources,
+            )
     data["services"] = services
 
     _drop_top_level_volumes_if_unused(data)
@@ -109,7 +115,13 @@ def _normalize_service_ports(service: Dict[str, Any]) -> None:
             normalized.append(_normalize_port_mapping(entry))
             continue
         if isinstance(entry, int):
-            normalized.append({"target": entry, "protocol": "tcp"})
+            normalized.append(
+                {
+                    "target": entry,
+                    "published": str(entry),
+                    "protocol": "tcp",
+                }
+            )
             continue
         if isinstance(entry, str):
             mapping = _normalize_port_string(entry)
@@ -120,6 +132,19 @@ def _normalize_service_ports(service: Dict[str, Any]) -> None:
 
 
 def _normalize_port_mapping(entry: Dict[str, Any]) -> Dict[str, Any]:
+    # Some YAML parsers can load a short-syntax port mapping like `- 880:8080`
+    # as a 1-item dict `{880: 8080}`. Convert that to long syntax.
+    if len(entry) == 1:
+        host, container = next(iter(entry.items()))
+        host_text = str(host).strip()
+        container_text = str(container).strip()
+        if container_text:
+            return {
+                "target": _as_int_if_digits(container_text),
+                "published": host_text or container_text,
+                "protocol": "tcp",
+            }
+
     target = entry.get("target")
     if target is None:
         target = entry.get("containerPort")
@@ -132,14 +157,18 @@ def _normalize_port_mapping(entry: Dict[str, Any]) -> Dict[str, Any]:
     if published is None:
         published = entry.get("host")
 
-    out: Dict[str, Any] = dict(entry)
-    out["target"] = _as_int_if_digits(target)
-    if published is not None and str(published).strip():
-        out["published"] = str(published).strip()
-    else:
-        out.pop("published", None)
-    out.pop("host", None)
-    out.setdefault("protocol", "tcp")
+    protocol = str(entry.get("protocol") or "").strip().lower() or "tcp"
+    target_value = _as_int_if_digits(target)
+    published_value = str(published).strip() if published is not None and str(published).strip() else str(target_value)
+
+    out: Dict[str, Any] = {
+        "target": target_value,
+        "published": published_value,
+        "protocol": protocol,
+    }
+    # Preserve optional "mode" if provided.
+    if "mode" in entry and str(entry.get("mode") or "").strip():
+        out["mode"] = entry.get("mode")
     return out
 
 
@@ -155,10 +184,13 @@ def _normalize_port_string(entry: str) -> Optional[Dict[str, Any]]:
     if not container:
         return None
 
-    out: Dict[str, Any] = {"target": _as_int_if_digits(container), "protocol": protocol}
-    if host:
-        out["published"] = str(host)
-    return out
+    target_value = _as_int_if_digits(container)
+    published_value = str(host).strip() if host else str(target_value)
+    return {
+        "target": target_value,
+        "published": published_value,
+        "protocol": protocol,
+    }
 
 
 def _extract_port_protocol(entry: str) -> Optional[str]:
@@ -172,7 +204,12 @@ def _extract_port_protocol(entry: str) -> Optional[str]:
     return None
 
 
-def _normalize_service_volumes(service_name: str, service: Dict[str, Any], app_data_root: str) -> None:
+def _normalize_service_volumes(
+    service_name: str,
+    service: Dict[str, Any],
+    app_data_root: str,
+    used_appdata_sources: set[str],
+) -> None:
     raw_volumes = service.get("volumes")
     if not raw_volumes:
         return
@@ -182,12 +219,22 @@ def _normalize_service_volumes(service_name: str, service: Dict[str, Any], app_d
     normalized = []
     for entry in raw_volumes:
         if isinstance(entry, dict):
-            volume = _normalize_volume_mapping(service_name, entry, app_data_root)
+            volume = _normalize_volume_mapping(
+                service_name,
+                entry,
+                app_data_root,
+                used_appdata_sources,
+            )
             if volume is not None:
                 normalized.append(volume)
             continue
         if isinstance(entry, str):
-            volume = _normalize_volume_string(service_name, entry, app_data_root)
+            volume = _normalize_volume_string(
+                service_name,
+                entry,
+                app_data_root,
+                used_appdata_sources,
+            )
             if volume is not None:
                 normalized.append(volume)
             continue
@@ -195,52 +242,157 @@ def _normalize_service_volumes(service_name: str, service: Dict[str, Any], app_d
 
 
 def _normalize_volume_mapping(
-    service_name: str, entry: Dict[str, Any], app_data_root: str
+    service_name: str,
+    entry: Dict[str, Any],
+    app_data_root: str,
+    used_appdata_sources: set[str],
 ) -> Optional[Dict[str, Any]]:
     target = entry.get("target") or entry.get("container") or entry.get("destination")
     if not target or not str(target).strip():
         return None
 
-    # If source looks like a named volume, keep it as the AppData subdir name.
     source_value = entry.get("source") or entry.get("src") or entry.get("volume")
-    subdir = ""
-    if isinstance(source_value, str) and _looks_like_named_volume(source_value):
-        subdir = source_value.strip()
-    else:
-        subdir = _derive_appdata_subdir(service_name, str(target))
+    target_text = str(target).strip()
 
-    out: Dict[str, Any] = {
-        "type": "bind",
-        "source": f"{app_data_root}/{subdir}",
-        "target": str(target),
-        "bind": {"create_host_path": True},
-    }
+    if isinstance(source_value, str) and _is_explicit_bind_source(source_value):
+        out: Dict[str, Any] = {"type": "bind", "source": source_value.strip(), "target": target_text}
+        if bool(entry.get("read_only")):
+            out["read_only"] = True
+        return out
+
+    source_path = _build_appdata_bind_source(
+        service_name=service_name,
+        target=target_text,
+        app_data_root=app_data_root,
+        used_appdata_sources=used_appdata_sources,
+        original_source=str(source_value) if isinstance(source_value, str) else None,
+    )
+    out = {"type": "bind", "source": source_path, "target": target_text}
     if bool(entry.get("read_only")):
         out["read_only"] = True
     return out
 
 
-def _normalize_volume_string(service_name: str, entry: str, app_data_root: str) -> Optional[Dict[str, Any]]:
+def _normalize_volume_string(
+    service_name: str,
+    entry: str,
+    app_data_root: str,
+    used_appdata_sources: set[str],
+) -> Optional[Dict[str, Any]]:
     source, target, mode = _parse_volume_spec(entry)
     if target is None:
         return None
     if not str(target).strip():
         return None
 
-    if source and _looks_like_named_volume(source):
-        subdir = source.strip()
-    else:
-        subdir = _derive_appdata_subdir(service_name, str(target))
+    target_text = str(target).strip()
 
-    out: Dict[str, Any] = {
-        "type": "bind",
-        "source": f"{app_data_root}/{subdir}",
-        "target": str(target),
-        "bind": {"create_host_path": True},
-    }
+    if isinstance(source, str) and source.strip() and _is_explicit_bind_source(source):
+        out: Dict[str, Any] = {"type": "bind", "source": source.strip(), "target": target_text}
+    else:
+        source_path = _build_appdata_bind_source(
+            service_name=service_name,
+            target=target_text,
+            app_data_root=app_data_root,
+            used_appdata_sources=used_appdata_sources,
+            original_source=source,
+        )
+        out = {"type": "bind", "source": source_path, "target": target_text}
+
     if mode and _is_read_only_mode(mode):
         out["read_only"] = True
     return out
+
+
+def _is_explicit_bind_source(source: str) -> bool:
+    """Return True if the source is an explicit host path/variable that we should keep.
+
+    For AppStore templates, we still normalize the syntax, but we should not rewrite
+    real host paths like `/DATA/Media/Music` into `/DATA/AppData/$AppID/...`.
+    """
+    text = str(source).strip()
+    if not text:
+        return False
+    if text.startswith("/"):
+        return True
+    if text.startswith("${") or text.startswith("$"):
+        return True
+    # Windows drive path (e.g. C:\data). Not typical for CasaOS but keep explicit paths.
+    if len(text) >= 3 and text[1] == ":" and text[2] in {"\\", "/"}:
+        return True
+    return False
+
+
+def _build_appdata_bind_source(
+    service_name: str,
+    target: str,
+    app_data_root: str,
+    used_appdata_sources: set[str],
+    original_source: Optional[str] = None,
+) -> str:
+    """Build a /DATA/AppData/$AppID/... source path for a container mount target."""
+    target_text = str(target).strip()
+    candidate_subpath = _relative_source_to_appdata_subpath(original_source) or ""
+
+    if not candidate_subpath:
+        last_segment = target_text.rstrip("/").split("/")[-1] if target_text else ""
+        candidate_subpath = _sanitize_segment(last_segment) or "data"
+
+    # Prefer `/DATA/AppData/$AppID/<candidate>` to match common CasaOS templates.
+    source_path = f"{app_data_root}/{candidate_subpath}"
+    if source_path in used_appdata_sources:
+        safe_service = _sanitize_segment(service_name) or "service"
+        source_path = f"{app_data_root}/{safe_service}-{candidate_subpath}"
+    if source_path in used_appdata_sources:
+        flattened = _sanitize_segment(target_text.strip("/").replace("/", "-"))
+        flattened = flattened or f"{_sanitize_segment(candidate_subpath.replace('/', '-')) or 'data'}-path"
+        safe_service = _sanitize_segment(service_name) or "service"
+        source_path = f"{app_data_root}/{safe_service}-{flattened}"
+
+    used_appdata_sources.add(source_path)
+    return source_path
+
+
+def _relative_source_to_appdata_subpath(source: Optional[str]) -> str:
+    """Convert a relative host source path into an AppData subpath.
+
+    Examples:
+    - "./data" -> "data"
+    - "./data/mysql" -> "data/mysql"
+    - ".\\data\\mysql" -> "data/mysql"
+
+    If the path looks unsafe (contains "..") or is an absolute/variable path,
+    returns an empty string so callers can fall back to target-derived names.
+    """
+    if source is None:
+        return ""
+
+    text = str(source).strip()
+    if not text:
+        return ""
+
+    # If it's already an explicit host path/variable, do not treat it as relative.
+    if _is_explicit_bind_source(text):
+        return ""
+
+    # Only attempt to preserve the source structure for obvious relative paths.
+    if not (text.startswith(".") or "/" in text or "\\" in text):
+        return ""
+
+    normalized = text.replace("\\", "/").lstrip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    normalized = normalized.lstrip("/")
+
+    segments = [segment for segment in normalized.split("/") if segment and segment != "."]
+    if not segments:
+        return ""
+    if any(segment == ".." for segment in segments):
+        return ""
+
+    safe_segments = [_sanitize_segment(segment) for segment in segments]
+    safe_segments = [segment for segment in safe_segments if segment]
+    return "/".join(safe_segments)
 
 
 def _parse_volume_spec(entry: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -350,4 +502,3 @@ def _drop_top_level_volumes_if_unused(data: Dict[str, Any]) -> None:
             volumes.pop(name, None)
     if not volumes:
         data.pop("volumes", None)
-

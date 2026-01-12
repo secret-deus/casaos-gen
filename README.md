@@ -159,5 +159,7 @@ Run `uv run casaos-gen-web` (or `python -m casaos_gen.webui`) to start a local F
   Stage 2 部分现在拆成 **单语言** 和 **多语言** 两个卡片：`app.category`/`service:web:index` 等在单语言卡片里编辑；`app.title`、`app.tips.before_install`、`service:web:port:8080` 等多语言字段在另一个卡片一次输入即可自动同步到全部语言。
 - Export YAML: trigger Stage 2 to generate CasaOS YAML directly in the UI textarea.  
   在界面中点击导出即可生成 CasaOS YAML 并复制。
+- AppStore format: the WebUI export always normalizes service `ports`/`volumes` into the AppStore-friendly long/bind syntax.  
+  AppStore 输出：WebUI 导出结果默认会将服务的 `ports`/`volumes` 规范化为 AppStore 常用的 long/bind 写法。
 - WebUI LLM settings persist under `llm_config.json` so you don’t have to re-enter Base URL/API key each session.  
   前端现已提供保存按钮，输入 Base URL / API Key / Model / Temperature 后点击 “Save LLM Settings” 即可写入 `llm_config.json`，以后默认自动加载。

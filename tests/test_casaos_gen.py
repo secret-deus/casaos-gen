@@ -208,12 +208,57 @@ class CasaOSComposeNormalizeTests(unittest.TestCase):
         volumes = out["services"]["nocodb"]["volumes"]
         self.assertIsInstance(volumes, list)
         self.assertEqual(volumes[0]["type"], "bind")
-        self.assertEqual(volumes[0]["source"], "/DATA/AppData/$AppID/nocodb_data")
+        self.assertEqual(volumes[0]["source"], "/DATA/AppData/$AppID/data")
         self.assertEqual(volumes[0]["target"], "/usr/app/data")
-        self.assertIn("bind", volumes[0])
-        self.assertEqual(volumes[0]["bind"]["create_host_path"], True)
+        self.assertNotIn("bind", volumes[0])
 
         self.assertNotIn("volumes", out)
+
+    def test_normalize_keeps_explicit_bind_sources(self):
+        compose = {
+            "services": {
+                "app": {
+                    "image": "example",
+                    "volumes": ["/DATA/Media/Music:/music"],
+                }
+            }
+        }
+        out = normalize_compose_for_appstore(compose, store_folder="demo")
+        volumes = out["services"]["app"]["volumes"]
+        self.assertEqual(volumes[0]["type"], "bind")
+        self.assertEqual(volumes[0]["source"], "/DATA/Media/Music")
+        self.assertEqual(volumes[0]["target"], "/music")
+
+    def test_normalize_converts_relative_bind_sources_to_appdata(self):
+        compose = {
+            "services": {
+                "db": {
+                    "image": "postgres:16",
+                    "volumes": ["./data/postgres:/var/lib/postgresql/data"],
+                }
+            }
+        }
+        out = normalize_compose_for_appstore(compose, store_folder="demo")
+        volumes = out["services"]["db"]["volumes"]
+        self.assertEqual(volumes[0]["type"], "bind")
+        self.assertEqual(volumes[0]["source"], "/DATA/AppData/$AppID/data/postgres")
+        self.assertEqual(volumes[0]["target"], "/var/lib/postgresql/data")
+
+    def test_normalize_converts_yaml_mapping_ports(self):
+        compose = {
+            "services": {
+                "app": {
+                    "image": "example",
+                    # YAML like: - 880:8080 can be parsed as a 1-item dict.
+                    "ports": [{880: 8080}],
+                }
+            }
+        }
+        out = normalize_compose_for_appstore(compose, store_folder="demo")
+        ports = out["services"]["app"]["ports"]
+        self.assertEqual(ports[0]["target"], 8080)
+        self.assertEqual(ports[0]["published"], "880")
+        self.assertEqual(ports[0]["protocol"], "tcp")
 
 
 if __name__ == "__main__":
