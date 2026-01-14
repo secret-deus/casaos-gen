@@ -8,7 +8,7 @@ from casaos_gen.constants import CDN_BASE
 from casaos_gen.i18n import load_translation_map, wrap_multilang
 from casaos_gen.parser import build_casaos_meta
 from casaos_gen.template_stage import build_params_skeleton, build_template_compose
-from casaos_gen.yaml_out import build_final_compose, write_compose_file
+from casaos_gen.yaml_out import build_final_compose, dump_yaml, write_compose_file
 
 
 class CasaOSParserTests(unittest.TestCase):
@@ -96,8 +96,28 @@ class CasaOSI18NTests(unittest.TestCase):
         final = build_final_compose(original, meta, ["en_US", "zh_CN"], translations)
         self.assertIn("x-casaos", final)
         self.assertIn("x-casaos", final["services"]["web"])
+        self.assertEqual(final["services"]["web"]["restart"], "unless-stopped")
         zh_desc = final["services"]["web"]["x-casaos"]["ports"][0]["description"]["zh_CN"]
         self.assertEqual(zh_desc, "主 Web 界面端口")
+
+    def test_build_final_compose_preserves_restart_when_set(self):
+        translation_file = Path("casaos_gen/translations.yml")
+        translations = load_translation_map(translation_file)
+        meta = models.CasaOSMeta(
+            app=models.AppMeta(
+                title="Sample",
+                tagline="Simple",
+                description="Sample app",
+                category="Web Server",
+                author="me",
+                main="web",
+                port_map="8080",
+            ),
+            services={},
+        )
+        original = {"services": {"web": {"image": "nginx", "restart": "always"}}}
+        final = build_final_compose(original, meta, ["en_US"], translations)
+        self.assertEqual(final["services"]["web"]["restart"], "always")
 
 
 class CasaOSTemplateStageTests(unittest.TestCase):
@@ -136,6 +156,7 @@ class CasaOSTemplateStageTests(unittest.TestCase):
         svc_x = out["services"]["web"]["x-casaos"]
         self.assertEqual(svc_x["ports"][0]["container"], "80")
         self.assertIn("zh_CN", svc_x["ports"][0]["description"])
+        self.assertEqual(out["services"]["web"]["restart"], "unless-stopped")
 
     def test_params_skeleton_is_generated_by_program(self):
         compose = {
@@ -165,6 +186,11 @@ class CasaOSTemplateStageTests(unittest.TestCase):
             self.assertIn("⏳", text)
         finally:
             path.unlink(missing_ok=True)
+
+    def test_dump_yaml_indents_list_items(self):
+        text = dump_yaml({"a": ["x", "y"], "b": {"c": [1, 2]}})
+        self.assertIn("a:\n  -", text)
+        self.assertIn("b:\n  c:\n    -", text)
 
 
 class CasaOSComposeNormalizeTests(unittest.TestCase):
@@ -198,6 +224,7 @@ class CasaOSComposeNormalizeTests(unittest.TestCase):
             "volumes": {"nocodb_data": None},
         }
         out = normalize_compose_for_appstore(compose, store_folder="nocodb")
+        self.assertEqual(out["services"]["nocodb"]["restart"], "unless-stopped")
         ports = out["services"]["nocodb"]["ports"]
         self.assertIsInstance(ports, list)
         self.assertIsInstance(ports[0], dict)

@@ -6,14 +6,12 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import yaml
-
 from . import models
 from .llm_stage1 import run_stage1_llm
 from .pipeline import render_compose
 from .parser import build_casaos_meta, load_compose_file
 from .template_stage import build_params_from_files, build_template_from_files
-from .yaml_out import write_compose_file
+from .yaml_out import dump_yaml, write_compose_file
 from .console import write_stdout_text
 
 logger = logging.getLogger(__name__)
@@ -65,7 +63,7 @@ def stage_two_from_meta(
 def write_final_compose(data: Dict, output_path: Path, dry_run: bool) -> None:
     if dry_run:
         logger.info("Dry run enabled; compose not written to disk.")
-        preview = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+        preview = dump_yaml(data)
         write_stdout_text(preview)
         return
     write_compose_file(data, output_path)

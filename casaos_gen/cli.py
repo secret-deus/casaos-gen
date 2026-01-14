@@ -30,6 +30,7 @@ from .main import (
     write_final_compose,
 )
 from .parser import load_compose_file
+from .yaml_out import dump_yaml
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -252,7 +253,7 @@ def main(argv: List[str] | None = None) -> int:
         # 原有流程（不使用增量更新）
         if args.stage == "params":
             params = run_params_stage(args.input_file)
-            yaml_text = yaml.safe_dump(params, sort_keys=False, allow_unicode=True)
+            yaml_text = dump_yaml(params)
             if args.dry_run:
                 write_stdout_text(yaml_text)
                 return 0
@@ -290,7 +291,7 @@ def main(argv: List[str] | None = None) -> int:
             if args.output:
                 write_final_compose(final_compose, args.output, args.dry_run)
             else:
-                yaml_text = yaml.safe_dump(final_compose, sort_keys=False, allow_unicode=True)
+                yaml_text = dump_yaml(final_compose)
                 write_stdout_text(yaml_text)
             return 0
 

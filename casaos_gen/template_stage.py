@@ -131,6 +131,8 @@ def build_template_compose(
 
     services_block = data.get("services") or {}
     for name, svc in services_block.items():
+        if isinstance(svc, dict) and not str(svc.get("restart") or "").strip():
+            svc["restart"] = "unless-stopped"
         overrides = params_services.get(name)
         if isinstance(overrides, dict):
             svc["x-casaos"] = overrides

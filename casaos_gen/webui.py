@@ -26,6 +26,7 @@ from .pipeline import (
     parse_params_text,
     render_compose,
 )
+from .yaml_out import dump_yaml
 
 try:
     from openai import OpenAI
@@ -640,7 +641,7 @@ async def build_template(
     STATE.compose_text = compose_text
     STATE.meta = None
 
-    yaml_text = yaml.safe_dump(template_compose, sort_keys=False, allow_unicode=True)
+    yaml_text = dump_yaml(template_compose)
     return PlainTextResponse(yaml_text, media_type="text/yaml")
 
 
@@ -701,7 +702,7 @@ async def export_compose() -> PlainTextResponse:
     if not compose.get("x-casaos"):
         raise HTTPException(status_code=400, detail="Stage 2 data unavailable. Run Stage 1 first.")
     compose = normalize_compose_for_appstore(compose)
-    yaml_text = yaml.safe_dump(compose, sort_keys=False, allow_unicode=True)
+    yaml_text = dump_yaml(compose)
     return PlainTextResponse(yaml_text, media_type="text/yaml")
 
 

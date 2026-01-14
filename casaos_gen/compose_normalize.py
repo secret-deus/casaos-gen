@@ -51,6 +51,8 @@ def normalize_compose_for_appstore(
         for name, svc in services.items():
             if not isinstance(svc, dict):
                 continue
+            if not str(svc.get("restart") or "").strip():
+                svc["restart"] = "unless-stopped"
             _normalize_service_ports(svc)
             _normalize_service_volumes(
                 name,
