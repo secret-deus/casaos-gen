@@ -469,6 +469,7 @@ async def fill_metadata(
     temperature: Optional[float] = Form(None),
     llm_base_url: Optional[str] = Form(None),
     llm_api_key: Optional[str] = Form(None),
+    llm_prompt: Optional[str] = Form(None),
 ) -> dict:
     if STATE.compose_data is None:
         raise HTTPException(status_code=400, detail="No compose file loaded.")
@@ -490,7 +491,13 @@ async def fill_metadata(
             use_params_value = False
 
     if not use_llm_value and not use_params_value:
-        raise HTTPException(status_code=400, detail="Select at least one of LLM or params.")
+        meta = STATE.meta or build_meta(STATE.compose_data)
+        STATE.meta = meta
+        return {
+            "status": "ok",
+            "message": "No fill requested; metadata unchanged.",
+            "meta": meta.model_dump(),
+        }
 
     params = None
     if use_params_value:
@@ -525,6 +532,7 @@ async def fill_metadata(
             temperature=temp_value,
             api_key=llm_api_key or STATE.llm_api_key,
             base_url=llm_base_url or STATE.llm_base_url,
+            prompt_instructions=llm_prompt,
         )
         if use_params_value:
             meta = apply_params_to_meta(meta, params)
@@ -560,6 +568,7 @@ async def upload_compose(
     temperature: float = Form(0.2),
     llm_base_url: Optional[str] = Form(None),
     llm_api_key: Optional[str] = Form(None),
+    llm_prompt: Optional[str] = Form(None),
 ) -> dict:
     _log_deprecated("/api/upload", "/api/compose + /api/meta/fill (+ /api/render)")
     content = await file.read()
@@ -577,6 +586,7 @@ async def upload_compose(
             temperature=temperature,
             api_key=llm_api_key,
             base_url=llm_base_url,
+            prompt_instructions=llm_prompt,
         )
     try:
         template_compose = render_compose(

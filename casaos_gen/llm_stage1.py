@@ -107,8 +107,19 @@ def _restore_existing_fields(meta: CasaOSMeta, original_mapping: dict) -> CasaOS
     return meta
 
 
-def build_stage1_prompt(structure: CasaOSMeta) -> str:
+def build_stage1_prompt(structure: CasaOSMeta, custom_prompt: Optional[str] = None) -> str:
     structure_json = structure.model_dump()
+    custom = (custom_prompt or "").strip()
+    custom_block = ""
+    if custom:
+        custom_block = f"""
+
+4. Additional user instructions:
+   - Follow these instructions with higher priority than the default guidelines above
+     when they do not conflict with the non-negotiable rules above.
+
+{custom}
+"""
     return f"""
 You are an expert in generating metadata for CasaOS applications.
 
@@ -126,20 +137,31 @@ Your task:
 
    If a field already contains non-empty text, keep it unchanged and only fill missing fields.
 
-2. DO NOT:
-   - add new keys
-   - remove keys
-   - rename keys
-   - reorder anything
-   - return Markdown or code blocks
-   - output YAML
+2. Non-negotiable rules:
+   - DO NOT add new keys
+   - DO NOT remove keys
+   - DO NOT rename keys
+   - DO NOT reorder anything
+   - DO NOT output YAML
+   - DO NOT wrap the response in Markdown code fences
+   - Return ONLY valid JSON (no text outside the JSON)
 
 3. Description guidelines:
    - Keep descriptions concise, professional, and accurate.
    - For ports: describe the function (e.g., "Main web interface port").
    - For environment variables: explain their purpose.
    - For volumes: describe the stored data.
-   - app.description must include a short introduction followed by a "Key Features:" list with bullet-style sentences.
+   - app.tagline: short and catchy (<= 90 characters).
+   - app.description MUST follow this structure (Markdown is allowed inside the string):
+     - Paragraph 1: what the app is and who it's for.
+     - Paragraph 2: core capabilities and typical use cases.
+     - Paragraph 3: self-hosting/CasaOS deployment notes.
+     - Blank line.
+     - "**Key Features:**" followed by 3-6 bullet points (each line starts with "- ").
+     - Blank line.
+     - "**Learn More:**" followed by 2-4 bullet points with Markdown links (e.g. "- [Official Website](https://...)").
+       Use official/verified URLs when confident; otherwise use placeholders like "<official_website>" and "<github_repo>".
+{custom_block}
 
 Here is the structure to fill:
 
@@ -157,6 +179,7 @@ def run_stage1_llm(
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     only_fill_empty: bool = False,
+    prompt_instructions: Optional[str] = None,
 ) -> CasaOSMeta:
     """
     调用 LLM 填充 CasaOS 元数据描述
@@ -191,7 +214,7 @@ def run_stage1_llm(
         structure, original_mapping = _filter_empty_fields(structure)
         logger.info("增量填充模式：保留已有字段，只填充空白字段")
 
-    prompt = build_stage1_prompt(structure)
+    prompt = build_stage1_prompt(structure, custom_prompt=prompt_instructions)
     logger.info("Calling LLM model %s for CasaOS metadata", model)
     response = client.chat.completions.create(
         model=model,

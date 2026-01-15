@@ -125,17 +125,27 @@ def build_template_compose(
         "scheme": str(params_app.get("scheme") or "http"),
         "index": str(params_app.get("index") or "/"),
     }
+    if "tips" in params_app:
+        app_block["tips"] = params_app.get("tips")
 
     data = copy.deepcopy(compose_data)
-    data["x-casaos"] = app_block
+    existing_app_x = data.get("x-casaos")
+    if not isinstance(existing_app_x, dict):
+        existing_app_x = {}
+    data["x-casaos"] = {**existing_app_x, **app_block}
 
     services_block = data.get("services") or {}
     for name, svc in services_block.items():
         if isinstance(svc, dict) and not str(svc.get("restart") or "").strip():
             svc["restart"] = "unless-stopped"
+        if isinstance(svc, dict) and not str(svc.get("container_name") or "").strip():
+            svc["container_name"] = name
         overrides = params_services.get(name)
         if isinstance(overrides, dict):
-            svc["x-casaos"] = overrides
+            existing_x = svc.get("x-casaos")
+            if not isinstance(existing_x, dict):
+                existing_x = {}
+            svc["x-casaos"] = {**existing_x, **overrides}
 
     langs = languages or DEFAULT_LANGUAGES
     return build_xcasaos_template(data, langs)

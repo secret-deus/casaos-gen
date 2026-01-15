@@ -260,6 +260,17 @@ def _normalize_multilang(value, languages: List[str]) -> Dict[str, str]:
     return {lang: text for lang in languages}
 
 
+def _normalize_tips(value, languages: List[str]):
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return value
+    normalized = {}
+    for section, payload in value.items():
+        normalized[section] = _normalize_multilang(payload, languages)
+    return normalized
+
+
 def build_xcasaos_template(compose_data: Dict, languages: List[str]) -> Dict:
     """Return a compose document with x-casaos blocks shaped to the template.
 
@@ -269,9 +280,13 @@ def build_xcasaos_template(compose_data: Dict, languages: List[str]) -> Dict:
     """
     data = copy.deepcopy(compose_data)
     services = data.get("services") or {}
+    if not isinstance(services, dict):
+        services = {}
 
     # App-level x-casaos
     app_block = data.get("x-casaos") or {}
+    if not isinstance(app_block, dict):
+        app_block = {}
     app_multis = {}
     for field in ("title", "tagline", "description"):
         app_multis[field] = _normalize_multilang(app_block.get(field), languages)
@@ -291,10 +306,24 @@ def build_xcasaos_template(compose_data: Dict, languages: List[str]) -> Dict:
     app_singles = {}
     for field, default in app_singles_defaults.items():
         app_singles[field] = app_block.get(field, default)
-    data["x-casaos"] = {**app_multis, **app_singles}
+
+    preserved = {
+        key: value
+        for key, value in app_block.items()
+        if key not in {"title", "tagline", "description", *app_singles_defaults.keys()}
+    }
+    data["x-casaos"] = {**preserved, **app_multis, **app_singles}
+
+    tips = _normalize_tips(app_block.get("tips"), languages)
+    if tips is not None:
+        data["x-casaos"]["tips"] = tips
 
     for name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
         x_block = svc.get("x-casaos") or {}
+        if not isinstance(x_block, dict):
+            x_block = {}
 
         def normalize_items(kind: str, fallback_builder):
             raw_items = x_block.get(kind)
@@ -313,7 +342,8 @@ def build_xcasaos_template(compose_data: Dict, languages: List[str]) -> Dict:
         envs = normalize_items("envs", extract_envs)
         ports = normalize_items("ports", extract_ports)
         volumes = normalize_items("volumes", extract_volumes)
-        svc["x-casaos"] = {"envs": envs, "ports": ports, "volumes": volumes}
+        svc_preserved = {key: value for key, value in x_block.items() if key not in {"envs", "ports", "volumes"}}
+        svc["x-casaos"] = {**svc_preserved, "envs": envs, "ports": ports, "volumes": volumes}
 
     data["services"] = services
     return data

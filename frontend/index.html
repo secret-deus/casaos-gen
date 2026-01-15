@@ -8,9 +8,28 @@
   </head>
   <body>
     <div id="root"></div>
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <script type="text/babel" src="/static/app.jsx" data-type="module"></script>
+
+    <!-- UI primitives -->
+    <script type="text/babel" src="/static/components/utils.jsx"></script>
+    <script type="text/babel" src="/static/components/Button.jsx"></script>
+    <script type="text/babel" src="/static/components/Card.jsx"></script>
+    <script type="text/babel" src="/static/components/Form.jsx"></script>
+    <script type="text/babel" src="/static/components/Tabs.jsx"></script>
+    <script type="text/babel" src="/static/components/Stepper.jsx"></script>
+    <script type="text/babel" src="/static/components/Toast.jsx"></script>
+    <script type="text/babel" src="/static/components/CodeViewer.jsx"></script>
+    <script type="text/babel" src="/static/components/Dropzone.jsx"></script>
+
+    <!-- Steps -->
+    <script type="text/babel" src="/static/steps/StepLoadCompose.jsx"></script>
+    <script type="text/babel" src="/static/steps/StepMetadata.jsx"></script>
+    <script type="text/babel" src="/static/steps/StepPreview.jsx"></script>
+    <script type="text/babel" src="/static/steps/StepExport.jsx"></script>
+
+    <!-- App -->
+    <script type="text/babel" src="/static/app.jsx"></script>
   </body>
 </html>

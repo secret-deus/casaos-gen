@@ -6,6 +6,7 @@ from casaos_gen import models
 from casaos_gen.compose_normalize import normalize_compose_for_appstore
 from casaos_gen.constants import CDN_BASE
 from casaos_gen.i18n import load_translation_map, wrap_multilang
+from casaos_gen.llm_stage1 import build_stage1_prompt
 from casaos_gen.parser import build_casaos_meta
 from casaos_gen.template_stage import build_params_skeleton, build_template_compose
 from casaos_gen.yaml_out import build_final_compose, dump_yaml, write_compose_file
@@ -120,6 +121,41 @@ class CasaOSI18NTests(unittest.TestCase):
         self.assertEqual(final["services"]["web"]["restart"], "always")
 
 
+class CasaOSLLMPromptTests(unittest.TestCase):
+    def test_stage1_prompt_includes_app_description_structure(self):
+        meta = models.CasaOSMeta(
+            app=models.AppMeta(
+                title="demo",
+                tagline="",
+                description="",
+                category="Utilities",
+                author="me",
+                main="demo",
+                port_map="8080",
+            ),
+            services={},
+        )
+        prompt = build_stage1_prompt(meta)
+        self.assertIn("Key Features", prompt)
+        self.assertIn("Learn More", prompt)
+
+    def test_stage1_prompt_accepts_custom_instructions(self):
+        meta = models.CasaOSMeta(
+            app=models.AppMeta(
+                title="demo",
+                tagline="",
+                description="",
+                category="Utilities",
+                author="me",
+                main="demo",
+                port_map="8080",
+            ),
+            services={},
+        )
+        prompt = build_stage1_prompt(meta, custom_prompt="CUSTOM_RULE: hello")
+        self.assertIn("CUSTOM_RULE: hello", prompt)
+
+
 class CasaOSTemplateStageTests(unittest.TestCase):
     def test_template_stage_builds_required_fields_and_i18n(self):
         compose = {
@@ -192,6 +228,32 @@ class CasaOSTemplateStageTests(unittest.TestCase):
         self.assertIn("a:\n  -", text)
         self.assertIn("b:\n  c:\n    -", text)
 
+    def test_dump_yaml_uses_block_scalars_for_multiline_strings(self):
+        text = dump_yaml({"x-casaos": {"description": {"zh_CN": "line1\n\nline2\n- item"}}})
+        self.assertIn("zh_CN: |", text)
+        self.assertNotIn("\\n", text)
+
+    def test_dump_yaml_uses_double_quotes_for_special_fields(self):
+        compose = {
+            "services": {
+                "app": {
+                    "ports": [
+                        {"target": 80, "published": "12345", "protocol": "tcp"},
+                    ],
+                    "x-casaos": {
+                        "ports": [
+                            {"container": "80", "description": {"en_US": "API Port"}},
+                        ]
+                    },
+                }
+            },
+            "x-casaos": {"port_map": "12345"},
+        }
+        text = dump_yaml(compose)
+        self.assertIn('published: "12345"', text)
+        self.assertIn('port_map: "12345"', text)
+        self.assertIn('container: "80"', text)
+
 
 class CasaOSComposeNormalizeTests(unittest.TestCase):
     def test_normalize_fills_cdn_media_links_when_missing(self):
@@ -240,6 +302,19 @@ class CasaOSComposeNormalizeTests(unittest.TestCase):
         self.assertNotIn("bind", volumes[0])
 
         self.assertNotIn("volumes", out)
+
+    def test_normalize_aligns_port_map_with_published_when_x_casaos_present(self):
+        compose = {
+            "services": {
+                "app": {"image": "nginx:latest", "ports": ["8080:8080"]},
+            },
+            "x-casaos": {"main": "app", "port_map": "8080"},
+        }
+        out = normalize_compose_for_appstore(compose, store_folder="demo")
+        ports = out["services"]["app"]["ports"]
+        self.assertEqual(out["x-casaos"]["port_map"], ports[0]["published"])
+        self.assertTrue(ports[0]["published"].isdigit())
+        self.assertLess(int(ports[0]["published"]), 30000)
 
     def test_normalize_keeps_explicit_bind_sources(self):
         compose = {

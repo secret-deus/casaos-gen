@@ -1,1034 +1,765 @@
-const { useEffect, useRef, useState } = React;
+(() => {
+  function bootstrap() {
+    const rootNS = window.CasaOSEditor;
+    const hasDeps =
+      rootNS &&
+      rootNS.utils &&
+      rootNS.api &&
+      rootNS.components &&
+      rootNS.steps &&
+      rootNS.components.Button &&
+      rootNS.components.Stepper &&
+      rootNS.components.ToastHost &&
+      rootNS.steps.StepLoadCompose &&
+      rootNS.steps.StepMetadata &&
+      rootNS.steps.StepPreview &&
+      rootNS.steps.StepExport;
 
-const LANG_OPTIONS = [
-  "de_DE",
-  "el_GR",
-  "en_GB",
-  "en_US",
-  "fr_FR",
-  "hr_HR",
-  "it_IT",
-  "ja_JP",
-  "ko_KR",
-  "nb_NO",
-  "pt_PT",
-  "ru_RU",
-  "sv_SE",
-  "tr_TR",
-  "zh_CN",
-];
+    if (!hasDeps) {
+      window.setTimeout(bootstrap, 20);
+      return;
+    }
 
-const DEFAULT_STATE = {
-  languages: LANG_OPTIONS,
-  has_compose: false,
-  has_meta: false,
-  has_stage2: false,
-  meta: null,
-  llm: {},
-};
+    const { useEffect, useMemo, useReducer, useRef } = React;
+    const { requestJSON, requestText } = rootNS.api;
+    const { cx, uid, readFileAsText, copyToClipboard, clamp } = rootNS.utils;
+    const { Button, IconButton, Stepper, ToastHost } = rootNS.components;
+    const { StepLoadCompose, StepMetadata, StepPreview, StepExport } = rootNS.steps;
 
-function Panel({ title, intro, actions, children, eyebrow, className }) {
-  return (
-    <section className={`panel${className ? ` ${className}` : ""}`}>
-      <div className="panel-head">
-        <div>
-          {eyebrow && <span className="panel-eyebrow">{eyebrow}</span>}
-          <h2>{title}</h2>
-          {intro && <small>{intro}</small>}
-        </div>
-        {actions && <div className="panel-actions">{actions}</div>}
-      </div>
-      {children}
-    </section>
-  );
-}
+    const STEPS = [
+      { key: "load", label: "Load Compose" },
+      { key: "metadata", label: "Metadata" },
+      { key: "preview", label: "Preview" },
+      { key: "export", label: "Export" },
+    ];
 
-function StatusBanner({ message }) {
-  if (!message) {
-    return null;
-  }
-  return <div className="status">{message}</div>;
-}
+    const initialState = {
+      wizard: {
+        stepIndex: 0,
+        unlockedIndex: 0,
+      },
+      compose: {
+        mode: "upload",
+        text: "",
+        file: null,
+      },
+      params: {
+        useLLM: true,
+        useParams: true,
+        autoRenderAfterSave: true,
+        file: null,
+        dirty: false,
+        draft: {
+          store_folder: "",
+          author: "",
+          developer: "",
+          title: "",
+          tagline: "",
+          description: "",
+          category: "",
+          main: "",
+          port_map: "",
+          scheme: "",
+          index: "",
+        },
+      },
+      llm: {
+        dirty: false,
+        draft: {
+          base_url: "",
+          api_key: "",
+          model: "gpt-4.1-mini",
+          temperature: 0.2,
+          prompt_template: "",
+        },
+      },
+      preview: {
+        tab: "compose",
+      },
+      renderedYaml: "",
+      engine: {
+        languages: [],
+        has_compose: false,
+        has_meta: false,
+        has_stage2: false,
+        meta: null,
+        llm: {},
+        lastSyncedAt: null,
+      },
+      busy: {
+        syncing: false,
+        loadingCompose: false,
+        fillingMeta: false,
+        savingLLM: false,
+        rendering: false,
+        exporting: false,
+      },
+      toasts: [],
+    };
 
-function SegmentedToggle({ value, options, onChange, className }) {
-  return (
-    <div className={`segmented${className ? ` ${className}` : ""}`}>
-      {options.map((option) => (
-        <button
-          key={option.value}
-          type="button"
-          className={value === option.value ? "active" : ""}
-          aria-pressed={value === option.value}
-          onClick={() => onChange(option.value)}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
-  );
-}
+    function reducer(state, action) {
+      switch (action.type) {
+        case "SET_STEP": {
+          return { ...state, wizard: { ...state.wizard, stepIndex: action.stepIndex } };
+        }
+        case "UNLOCK_STEP": {
+          return {
+            ...state,
+            wizard: { ...state.wizard, unlockedIndex: Math.max(state.wizard.unlockedIndex, action.index) },
+          };
+        }
+        case "SET_COMPOSE_MODE": {
+          return { ...state, compose: { ...state.compose, mode: action.mode } };
+        }
+        case "SET_COMPOSE_TEXT": {
+          return { ...state, compose: { ...state.compose, text: action.text } };
+        }
+        case "SET_COMPOSE_FILE": {
+          return { ...state, compose: { ...state.compose, file: action.file || null } };
+        }
+        case "SET_PARAMS_FILE": {
+          return { ...state, params: { ...state.params, file: action.file || null } };
+        }
+        case "SET_PARAMS_MODE": {
+          return { ...state, params: { ...state.params, [action.key]: Boolean(action.value) } };
+        }
+        case "SET_PARAMS_DRAFT_FIELD": {
+          return {
+            ...state,
+            params: {
+              ...state.params,
+              dirty: true,
+              draft: {
+                ...state.params.draft,
+                [action.field]: action.value,
+              },
+            },
+          };
+        }
+        case "SET_LLM_DRAFT_FIELD": {
+          return {
+            ...state,
+            llm: {
+              ...state.llm,
+              dirty: true,
+              draft: {
+                ...state.llm.draft,
+                [action.field]: action.value,
+              },
+            },
+          };
+        }
+        case "SET_PREVIEW_TAB": {
+          return { ...state, preview: { ...state.preview, tab: action.tab } };
+        }
+        case "SET_RENDERED_YAML": {
+          return { ...state, renderedYaml: action.value };
+        }
+        case "SET_ENGINE": {
+          const nextEngine = { ...state.engine, ...action.engine, lastSyncedAt: action.lastSyncedAt };
+          let nextUnlocked = state.wizard.unlockedIndex;
+          if (!nextEngine.has_compose) {
+            nextUnlocked = 0;
+          } else if (nextEngine.has_stage2) {
+            nextUnlocked = Math.max(nextUnlocked, 3);
+          } else {
+            nextUnlocked = Math.max(nextUnlocked, 1);
+          }
 
-function AssistantOverlay({
-  open,
-  target,
-  context,
-  messages,
-  input,
-  loading,
-  onTargetChange,
-  onInputChange,
-  onSend,
-  onReset,
-  onClose,
-  onApplyMulti,
-  onApplySingle,
-  endRef,
-}) {
-  if (!open) {
-    return null;
-  }
-  return (
-    <div className="assistant-overlay">
-      <div className="assistant-window">
-        <div className="assistant-header">
-          <div>
-            <div className="badge">Copilot</div>
-            <h3 style={{ margin: "0.25rem 0" }}>LLM Dialog</h3>
-            <small>
-              Target: {target || "general guidance"}
-              {context && (
-                <span>
-                  <br />
-                  Context: {context}
-                </span>
-              )}
-            </small>
-          </div>
-          <div className="assistant-actions">
-            <button className="ghost" onClick={onReset}>
-              Reset Thread
-            </button>
-            <button onClick={onClose}>Close</button>
-          </div>
-        </div>
-        <div className="assistant-messages">
-          {messages.map((msg, index) => (
-            <div
-              key={index}
-              className={`assistant-message ${msg.role === "user" ? "user" : "assistant"}`}
-            >
-              {msg.content}
+          const nextState = {
+            ...state,
+            engine: nextEngine,
+            wizard: { ...state.wizard, unlockedIndex: nextUnlocked },
+          };
+
+          if (!state.llm.dirty && action.engine?.llm) {
+            nextState.llm = {
+              ...nextState.llm,
+              draft: {
+                ...nextState.llm.draft,
+                base_url: action.engine.llm.base_url || "",
+                model: action.engine.llm.model || nextState.llm.draft.model,
+                temperature:
+                  typeof action.engine.llm.temperature === "number"
+                    ? action.engine.llm.temperature
+                    : nextState.llm.draft.temperature,
+              },
+            };
+          }
+
+          if (!state.params.dirty && action.engine?.meta?.app) {
+            const app = action.engine.meta.app;
+            nextState.params = {
+              ...nextState.params,
+              draft: {
+                ...nextState.params.draft,
+                author: app.author || nextState.params.draft.author,
+                developer: app.developer || nextState.params.draft.developer,
+                title: app.title || nextState.params.draft.title,
+                tagline: app.tagline || nextState.params.draft.tagline,
+                description: app.description || nextState.params.draft.description,
+                category: app.category || nextState.params.draft.category,
+                main: app.main || nextState.params.draft.main,
+                port_map: app.port_map || nextState.params.draft.port_map,
+                scheme: app.scheme || nextState.params.draft.scheme,
+                index: app.index || nextState.params.draft.index,
+              },
+            };
+          }
+
+          return nextState;
+        }
+        case "SET_BUSY": {
+          return { ...state, busy: { ...state.busy, [action.key]: Boolean(action.value) } };
+        }
+        case "PUSH_TOAST": {
+          return { ...state, toasts: [...state.toasts, action.toast] };
+        }
+        case "DISMISS_TOAST": {
+          return { ...state, toasts: state.toasts.filter((item) => item.id !== action.id) };
+        }
+        case "RESET_FOR_NEW_COMPOSE": {
+          return {
+            ...state,
+            preview: { tab: "compose" },
+            renderedYaml: "",
+            wizard: { stepIndex: 1, unlockedIndex: 1 },
+          };
+        }
+        default:
+          return state;
+      }
+    }
+
+    function App() {
+      const [state, dispatch] = useReducer(reducer, initialState);
+      const firstSyncRef = useRef(true);
+      const toastTimersRef = useRef(new Map());
+
+      const engineMaxIndex = useMemo(() => {
+        if (!state.engine.has_compose) {
+          return 0;
+        }
+        if (state.engine.has_stage2) {
+          return 3;
+        }
+        return 2;
+      }, [state.engine.has_compose, state.engine.has_stage2]);
+
+      const maxEnabledIndex = Math.min(engineMaxIndex, state.wizard.unlockedIndex);
+
+      const pushToast = (toast) => {
+        const id = toast.id || uid("toast");
+        dispatch({
+          type: "PUSH_TOAST",
+          toast: {
+            id,
+            title: toast.title || "",
+            message: toast.message || "",
+            variant: toast.variant || "info",
+          },
+        });
+        const duration = clamp(toast.duration ?? 4500, 1500, 15000);
+        if (toastTimersRef.current.has(id)) {
+          window.clearTimeout(toastTimersRef.current.get(id));
+        }
+        toastTimersRef.current.set(
+          id,
+          window.setTimeout(() => {
+            dispatch({ type: "DISMISS_TOAST", id });
+            toastTimersRef.current.delete(id);
+          }, duration)
+        );
+      };
+
+      const dismissToast = (id) => {
+        dispatch({ type: "DISMISS_TOAST", id });
+        const timer = toastTimersRef.current.get(id);
+        if (timer) {
+          window.clearTimeout(timer);
+          toastTimersRef.current.delete(id);
+        }
+      };
+
+      const syncUIState = async ({ silent = false } = {}) => {
+        dispatch({ type: "SET_BUSY", key: "syncing", value: true });
+        try {
+          const data = await requestJSON("/api/state");
+          dispatch({ type: "SET_ENGINE", engine: data, lastSyncedAt: Date.now() });
+          if (!silent) {
+            pushToast({ title: "Synced", message: "UI state refreshed from server.", variant: "info", duration: 2200 });
+          }
+          return data;
+        } catch (error) {
+          if (!silent) {
+            pushToast({ title: "Sync failed", message: error.message, variant: "danger" });
+          }
+          return null;
+        } finally {
+          dispatch({ type: "SET_BUSY", key: "syncing", value: false });
+        }
+      };
+
+      useEffect(() => {
+        syncUIState({ silent: true });
+      }, []);
+
+      useEffect(() => {
+        // Keep UI in sync even if server state changes outside the current step.
+        syncUIState({ silent: true });
+      }, [state.wizard.stepIndex]);
+
+      useEffect(() => {
+        if (!firstSyncRef.current) {
+          return;
+        }
+        if (state.engine.lastSyncedAt == null) {
+          return;
+        }
+        firstSyncRef.current = false;
+
+        if (state.engine.has_stage2) {
+          dispatch({ type: "UNLOCK_STEP", index: 3 });
+          dispatch({ type: "SET_STEP", stepIndex: 3 });
+          return;
+        }
+        if (state.engine.has_compose) {
+          dispatch({ type: "UNLOCK_STEP", index: 1 });
+          dispatch({ type: "SET_STEP", stepIndex: 1 });
+        }
+      }, [state.engine.has_compose, state.engine.has_stage2, state.engine.lastSyncedAt]);
+
+      useEffect(() => {
+        if (!state.engine.has_compose && state.wizard.stepIndex !== 0) {
+          dispatch({ type: "SET_STEP", stepIndex: 0 });
+        }
+        if (state.wizard.stepIndex > maxEnabledIndex) {
+          dispatch({ type: "SET_STEP", stepIndex: maxEnabledIndex });
+        }
+      }, [state.engine.has_compose, maxEnabledIndex, state.wizard.stepIndex]);
+
+      useEffect(() => {
+        if (
+          state.wizard.stepIndex === 3 &&
+          state.engine.has_stage2 &&
+          !state.busy.exporting &&
+          !String(state.renderedYaml || "").trim()
+        ) {
+          refreshExportYaml();
+        }
+      }, [state.wizard.stepIndex, state.engine.has_stage2]);
+
+      useEffect(
+        () => () => {
+          for (const timer of toastTimersRef.current.values()) {
+            window.clearTimeout(timer);
+          }
+          toastTimersRef.current.clear();
+        },
+        []
+      );
+
+      const buildParamsPayload = () => ({
+        app: {
+          store_folder: String(state.params.draft.store_folder || "").trim(),
+          author: String(state.params.draft.author || "").trim(),
+          developer: String(state.params.draft.developer || "").trim(),
+          title: String(state.params.draft.title || "").trim(),
+          tagline: String(state.params.draft.tagline || "").trim(),
+          description: state.params.draft.description || "",
+          category: String(state.params.draft.category || "").trim(),
+          main: String(state.params.draft.main || "").trim(),
+          port_map: String(state.params.draft.port_map || "").trim(),
+          scheme: String(state.params.draft.scheme || "").trim(),
+          index: String(state.params.draft.index || "").trim(),
+        },
+      });
+
+      const loadComposeFromFile = async () => {
+        const file = state.compose.file;
+        if (!file) {
+          pushToast({ title: "No file selected", message: "Choose a .yml/.yaml file first.", variant: "warning" });
+          return;
+        }
+        dispatch({ type: "SET_BUSY", key: "loadingCompose", value: true });
+        try {
+          const text = await readFileAsText(file);
+          dispatch({ type: "SET_COMPOSE_TEXT", text });
+          const formData = new FormData();
+          formData.append("file", file);
+          await requestJSON("/api/compose", { method: "POST", body: formData });
+          await syncUIState({ silent: true });
+          dispatch({ type: "UNLOCK_STEP", index: 1 });
+          dispatch({ type: "RESET_FOR_NEW_COMPOSE" });
+          pushToast({ title: "Compose loaded", message: "Compose parsed successfully.", variant: "success" });
+        } catch (error) {
+          pushToast({ title: "Load failed", message: error.message, variant: "danger" });
+        } finally {
+          dispatch({ type: "SET_BUSY", key: "loadingCompose", value: false });
+        }
+      };
+
+      const loadComposeFromText = async () => {
+        const text = state.compose.text;
+        if (!String(text || "").trim()) {
+          pushToast({ title: "Empty content", message: "Paste compose YAML first.", variant: "warning" });
+          return;
+        }
+        dispatch({ type: "SET_BUSY", key: "loadingCompose", value: true });
+        try {
+          await requestJSON("/api/compose-text", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text }),
+          });
+          await syncUIState({ silent: true });
+          dispatch({ type: "UNLOCK_STEP", index: 1 });
+          dispatch({ type: "RESET_FOR_NEW_COMPOSE" });
+          pushToast({ title: "Compose loaded", message: "Compose parsed successfully.", variant: "success" });
+        } catch (error) {
+          pushToast({ title: "Load failed", message: error.message, variant: "danger" });
+        } finally {
+          dispatch({ type: "SET_BUSY", key: "loadingCompose", value: false });
+        }
+      };
+
+      const saveLLMSettings = async () => {
+        dispatch({ type: "SET_BUSY", key: "savingLLM", value: true });
+        try {
+          const formData = new FormData();
+          formData.append("base_url", state.llm.draft.base_url || "");
+          if (String(state.llm.draft.api_key || "").trim()) {
+            formData.append("api_key", state.llm.draft.api_key.trim());
+          }
+          formData.append("model", state.llm.draft.model || "gpt-4.1-mini");
+          formData.append("temperature", String(state.llm.draft.temperature ?? 0.2));
+          await requestJSON("/api/llm", { method: "POST", body: formData });
+          await syncUIState({ silent: true });
+          pushToast({ title: "Saved", message: "LLM settings updated.", variant: "success" });
+        } catch (error) {
+          pushToast({ title: "LLM save failed", message: error.message, variant: "danger" });
+        } finally {
+          dispatch({ type: "SET_BUSY", key: "savingLLM", value: false });
+        }
+      };
+
+      const renderStage2 = async ({ focusTab = true } = {}) => {
+        dispatch({ type: "SET_BUSY", key: "rendering", value: true });
+        try {
+          await requestJSON("/api/render", { method: "POST" });
+          const yamlText = await requestText("/api/export", { method: "POST" });
+          dispatch({ type: "SET_RENDERED_YAML", value: yamlText });
+          if (focusTab) {
+            dispatch({ type: "SET_PREVIEW_TAB", tab: "rendered" });
+          }
+          await syncUIState({ silent: true });
+          dispatch({ type: "UNLOCK_STEP", index: 3 });
+          pushToast({ title: "Rendered", message: "x-casaos output is ready.", variant: "success" });
+        } catch (error) {
+          pushToast({ title: "Render failed", message: error.message, variant: "danger" });
+        } finally {
+          dispatch({ type: "SET_BUSY", key: "rendering", value: false });
+        }
+      };
+
+      const fillMetadata = async () => {
+        if (!state.engine.has_compose) {
+          pushToast({ title: "No compose", message: "Load a compose file first.", variant: "warning" });
+          return;
+        }
+        if (!state.params.useLLM && !state.params.useParams) {
+          pushToast({ title: "Select a mode", message: "Enable Params and/or LLM.", variant: "warning" });
+          return;
+        }
+        dispatch({ type: "SET_BUSY", key: "fillingMeta", value: true });
+        try {
+          const formData = new FormData();
+          formData.append("use_llm", state.params.useLLM ? "true" : "false");
+          formData.append("use_params", state.params.useParams ? "true" : "false");
+
+          if (state.params.useLLM) {
+            formData.append("model", state.llm.draft.model || "gpt-4.1-mini");
+            formData.append("temperature", String(state.llm.draft.temperature ?? 0.2));
+            if (String(state.llm.draft.base_url || "").trim()) {
+              formData.append("llm_base_url", state.llm.draft.base_url.trim());
+            }
+            if (String(state.llm.draft.api_key || "").trim()) {
+              formData.append("llm_api_key", state.llm.draft.api_key.trim());
+            }
+          }
+
+          if (state.params.useParams) {
+            if (state.params.file) {
+              formData.append("params_file", state.params.file);
+            } else {
+              formData.append("params_json", JSON.stringify(buildParamsPayload()));
+            }
+          }
+
+          await requestJSON("/api/meta/fill", { method: "POST", body: formData });
+          await syncUIState({ silent: true });
+          dispatch({ type: "SET_RENDERED_YAML", value: "" });
+          pushToast({ title: "Metadata saved", message: "Metadata updated successfully.", variant: "success" });
+
+          if (state.params.autoRenderAfterSave) {
+            await renderStage2({ focusTab: false });
+          }
+        } catch (error) {
+          pushToast({ title: "Metadata failed", message: error.message, variant: "danger" });
+        } finally {
+          dispatch({ type: "SET_BUSY", key: "fillingMeta", value: false });
+        }
+      };
+
+      const refreshExportYaml = async () => {
+        dispatch({ type: "SET_BUSY", key: "exporting", value: true });
+        try {
+          const yamlText = await requestText("/api/export", { method: "POST" });
+          dispatch({ type: "SET_RENDERED_YAML", value: yamlText });
+          pushToast({ title: "YAML refreshed", message: "Export updated from server.", variant: "success", duration: 2500 });
+        } catch (error) {
+          pushToast({ title: "Export failed", message: error.message, variant: "danger" });
+        } finally {
+          dispatch({ type: "SET_BUSY", key: "exporting", value: false });
+        }
+      };
+
+      const downloadYaml = () => {
+        const text = state.renderedYaml;
+        if (!text.trim()) {
+          pushToast({ title: "Nothing to download", message: "Export YAML first.", variant: "warning" });
+          return;
+        }
+        const blob = new Blob([text], { type: "text/yaml;charset=utf-8" });
+        const url = window.URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = "casaos-compose.yml";
+        anchor.click();
+        window.URL.revokeObjectURL(url);
+      };
+
+      const copyYaml = async () => {
+        const ok = await copyToClipboard(state.renderedYaml);
+        pushToast({
+          title: ok ? "Copied" : "Copy failed",
+          message: ok ? "YAML copied to clipboard." : "Browser refused clipboard access.",
+          variant: ok ? "success" : "danger",
+          duration: 2500,
+        });
+      };
+
+      const canContinue = useMemo(() => {
+        if (state.wizard.stepIndex === 0) {
+          return state.engine.has_compose;
+        }
+        if (state.wizard.stepIndex === 1) {
+          return state.engine.has_compose;
+        }
+        if (state.wizard.stepIndex === 2) {
+          return state.engine.has_stage2;
+        }
+        return true;
+      }, [state.engine.has_compose, state.engine.has_stage2, state.wizard.stepIndex]);
+
+      const onBack = () => {
+        dispatch({ type: "SET_STEP", stepIndex: Math.max(0, state.wizard.stepIndex - 1) });
+      };
+
+      const onContinue = () => {
+        const current = state.wizard.stepIndex;
+        const next = Math.min(STEPS.length - 1, current + 1);
+        dispatch({ type: "UNLOCK_STEP", index: next });
+        dispatch({ type: "SET_STEP", stepIndex: next });
+        if (next === 3 && state.engine.has_stage2 && !state.renderedYaml.trim()) {
+          refreshExportYaml();
+        }
+      };
+
+      const footerRight = useMemo(() => {
+        if (state.wizard.stepIndex === 3) {
+          return (
+            <div className="footer__actions">
+              <Button
+                variant="secondary"
+                disabled={!state.engine.has_stage2 || !state.renderedYaml.trim()}
+                onClick={downloadYaml}
+              >
+                Download
+              </Button>
+              <Button
+                variant="primary"
+                disabled={!state.engine.has_stage2 || !state.renderedYaml.trim()}
+                onClick={copyYaml}
+              >
+                Copy YAML
+              </Button>
             </div>
-          ))}
-          {loading && <div className="assistant-message assistant">Thinking...</div>}
-          <div ref={endRef} />
-        </div>
-        <div className="assistant-controls">
-          <div className="assistant-toolbar">
-            <input
-              type="text"
-              placeholder="Target path (app.title, service:web:port:8080...)"
-              value={target}
-              onChange={(event) => onTargetChange(event.target.value)}
-            />
-            <textarea
-              placeholder="Ask the copilot for a rewrite or description... (Ctrl+Enter to send)"
-              value={input}
-              onChange={(event) => onInputChange(event.target.value)}
-              onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                  event.preventDefault();
-                  onSend();
-                }
-              }}
-            />
-            <button onClick={onSend} disabled={loading}>
-              {loading ? "Sending..." : "Send"}
-            </button>
+          );
+        }
+        return (
+          <Button
+            variant="primary"
+            disabled={!canContinue}
+            onClick={onContinue}
+          >
+            Continue
+          </Button>
+        );
+      }, [state.wizard.stepIndex, state.engine.has_stage2, state.renderedYaml, canContinue]);
+
+      const mainContent = useMemo(() => {
+        switch (state.wizard.stepIndex) {
+          case 0:
+            return (
+              <StepLoadCompose
+                mode={state.compose.mode}
+                onModeChange={(mode) => dispatch({ type: "SET_COMPOSE_MODE", mode })}
+                composeText={state.compose.text}
+                composeFile={state.compose.file}
+                onComposeTextChange={(text) => dispatch({ type: "SET_COMPOSE_TEXT", text })}
+                onComposeFileChange={(file) => dispatch({ type: "SET_COMPOSE_FILE", file })}
+                onLoadFromFile={loadComposeFromFile}
+                onLoadFromText={loadComposeFromText}
+                engine={state.engine}
+                busy={state.busy.loadingCompose}
+              />
+            );
+          case 1:
+            return (
+              <StepMetadata
+                engine={state.engine}
+                useLLM={state.params.useLLM}
+                useParams={state.params.useParams}
+                autoRenderAfterSave={state.params.autoRenderAfterSave}
+                onUseLLMChange={(value) => dispatch({ type: "SET_PARAMS_MODE", key: "useLLM", value })}
+                onUseParamsChange={(value) => dispatch({ type: "SET_PARAMS_MODE", key: "useParams", value })}
+                onAutoRenderChange={(value) => dispatch({ type: "SET_PARAMS_MODE", key: "autoRenderAfterSave", value })}
+                metadataDraft={state.params.draft}
+                onMetadataFieldChange={(field, value) => dispatch({ type: "SET_PARAMS_DRAFT_FIELD", field, value })}
+                paramsFile={state.params.file}
+                onParamsFileChange={(file) => dispatch({ type: "SET_PARAMS_FILE", file })}
+                llmDraft={state.llm.draft}
+                onLLMFieldChange={(field, value) => {
+                  if (field === "temperature") {
+                    dispatch({ type: "SET_LLM_DRAFT_FIELD", field, value: clamp(value, 0, 2) });
+                    return;
+                  }
+                  dispatch({ type: "SET_LLM_DRAFT_FIELD", field, value });
+                }}
+                onSaveLLMSettings={saveLLMSettings}
+                onFillMetadata={fillMetadata}
+                busy={{
+                  fillingMeta: state.busy.fillingMeta,
+                  savingLLM: state.busy.savingLLM,
+                  rendering: state.busy.rendering,
+                }}
+              />
+            );
+          case 2:
+            return (
+              <StepPreview
+                engine={state.engine}
+                composeText={state.compose.text}
+                renderedYaml={state.renderedYaml}
+                tab={state.preview.tab}
+                onTabChange={(tab) => dispatch({ type: "SET_PREVIEW_TAB", tab })}
+                onRender={renderStage2}
+                busy={{ rendering: state.busy.rendering }}
+              />
+            );
+          case 3:
+            return (
+              <StepExport
+                engine={state.engine}
+                renderedYaml={state.renderedYaml}
+                onRefresh={refreshExportYaml}
+                busy={{ exporting: state.busy.exporting }}
+              />
+            );
+          default:
+            return null;
+        }
+      }, [state]);
+
+      const headerSubtitle = useMemo(() => {
+        if (state.engine.has_stage2) {
+          return "Rendered output ready for export.";
+        }
+        if (state.engine.has_compose) {
+          return "Compose loaded. Configure metadata, then render.";
+        }
+        return "Load a docker-compose.yml to begin.";
+      }, [state.engine.has_compose, state.engine.has_stage2]);
+
+      return (
+        <div className="app">
+          <header className="appHeader">
+            <div className="appHeader__inner">
+              <div className="appHeader__left">
+                <div className="appTitleRow">
+                  <h1 className="appTitle">CasaOS Compose Visual Editor</h1>
+                  <span className="pill pill--muted">Wizard</span>
+                </div>
+                <p className="appSubtitle">{headerSubtitle}</p>
+              </div>
+              <div className="appHeader__right">
+                <IconButton label="Refresh" loading={state.busy.syncing} onClick={() => syncUIState()}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path
+                      d="M20 12a8 8 0 1 1-2.34-5.66"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                    />
+                    <path
+                      d="M20 4v6h-6"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </IconButton>
+              </div>
+            </div>
+          </header>
+
+          <div className="stepperWrap">
+            <div className="container">
+              <Stepper
+                steps={STEPS}
+                activeIndex={state.wizard.stepIndex}
+                maxEnabledIndex={maxEnabledIndex}
+                onStepChange={(index) => dispatch({ type: "SET_STEP", stepIndex: index })}
+              />
+            </div>
           </div>
-          <div className="assistant-actions">
-            <button onClick={onApplyMulti}>Apply to Multi-language</button>
-            <button onClick={onApplySingle}>Apply to Single-language</button>
-          </div>
+
+          <main className="main">
+            <div className="container">{mainContent}</div>
+          </main>
+
+          <footer className="footer">
+            <div className="container footer__inner">
+              <div className="footer__left">
+                <Button variant="secondary" disabled={state.wizard.stepIndex === 0} onClick={onBack}>
+                  Back
+                </Button>
+              </div>
+              <div className="footer__right">{footerRight}</div>
+            </div>
+          </footer>
+
+          <ToastHost toasts={state.toasts} onDismiss={dismissToast} />
         </div>
-      </div>
-    </div>
-  );
-}
-
-function useStatusMessage(timeout = 4200) {
-  const [message, setMessage] = useState("");
-  const timerRef = useRef(null);
-
-  const show = (text) => {
-    setMessage(text);
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
+      );
     }
-    if (text) {
-      timerRef.current = setTimeout(() => setMessage(""), timeout);
-    }
-  };
 
-  useEffect(
-    () => () => {
-      if (timerRef.current) {
-        clearTimeout(timerRef.current);
-      }
-    },
-    []
-  );
-
-  return [message, show];
-}
-
-async function requestJSON(url, options) {
-  const response = await fetch(url, options);
-  const hasJSON = response.headers.get("content-type")?.includes("application/json");
-  const data = hasJSON ? await response.json() : {};
-  if (!response.ok) {
-    const detail = data.detail || data.message || "Request failed";
-    throw new Error(detail);
+    const container = document.getElementById("root");
+    const reactRoot = ReactDOM.createRoot(container);
+    reactRoot.render(<App />);
   }
-  return data;
-}
 
-async function requestText(url, options) {
-  const response = await fetch(url, options);
-  const text = await response.text();
-  if (!response.ok) {
-    let detail = "Request failed";
-    try {
-      const payload = JSON.parse(text);
-      detail = payload.detail || detail;
-    } catch {
-      detail = text || detail;
-    }
-    throw new Error(detail);
-  }
-  return text;
-}
-
-function App() {
-  const [state, setState] = useState(DEFAULT_STATE);
-  const [useLLM, setUseLLM] = useState(true);
-  const [useParams, setUseParams] = useState(true);
-  const [metaMode, setMetaMode] = useState("multi");
-  const [metaTarget, setMetaTarget] = useState("");
-  const [metaValue, setMetaValue] = useState("");
-  const [exportOutput, setExportOutput] = useState("");
-  const [composeText, setComposeText] = useState("");
-  const [model, setModel] = useState("gpt-4.1-mini");
-  const [temperature, setTemperature] = useState(0.2);
-  const [llmBaseUrl, setLlmBaseUrl] = useState("");
-  const [llmApiKey, setLlmApiKey] = useState("");
-  const [llmSettingsOpen, setLlmSettingsOpen] = useState(true);
-  const [paramsEditorOpen, setParamsEditorOpen] = useState(true);
-  const [paramsDirty, setParamsDirty] = useState(false);
-  const [paramsForm, setParamsForm] = useState({
-    store_folder: "",
-    author: "",
-    developer: "",
-    title: "",
-    tagline: "",
-    description: "",
-  });
-  const [assistantOpen, setAssistantOpen] = useState(false);
-  const [assistantTarget, setAssistantTarget] = useState("");
-  const [assistantInput, setAssistantInput] = useState("");
-  const [assistantMessages, setAssistantMessages] = useState([]);
-  const [assistantLastText, setAssistantLastText] = useState("");
-  const [assistantContext, setAssistantContext] = useState("");
-  const [assistantLoading, setAssistantLoading] = useState(false);
-  const [status, showStatus] = useStatusMessage();
-
-  // 版本管理状态
-  const [versions, setVersions] = useState([]);
-  const [versionsLoading, setVersionsLoading] = useState(false);
-  const [diffInfo, setDiffInfo] = useState(null);
-  const [diffLoading, setDiffLoading] = useState(false);
-  const [incrementalLoading, setIncrementalLoading] = useState(false);
-
-  const fileRef = useRef(null);
-  const paramsFileRef = useRef(null);
-  const assistantEndRef = useRef(null);
-
-  const refreshState = async () => {
-    try {
-      const data = await requestJSON("/api/state");
-      setState(data);
-    } catch (error) {
-      showStatus(error.message);
-    }
-  };
-
-  useEffect(() => {
-    refreshState();
-  }, []);
-
-  useEffect(() => {
-    const llm = state.llm || {};
-    if (llm.base_url) {
-      setLlmBaseUrl(llm.base_url);
-    }
-    if (llm.api_key) {
-      setLlmApiKey("********");
-    }
-    if (llm.model) {
-      setModel(llm.model);
-    }
-    if (typeof llm.temperature === "number") {
-      setTemperature(llm.temperature);
-    }
-  }, [state.llm]);
-
-  const seedParamsFromMeta = (meta) => {
-    if (!meta || !meta.app) {
-      return;
-    }
-    setParamsForm({
-      store_folder: "",
-      author: meta.app.author || "",
-      developer: meta.app.developer || "",
-      title: meta.app.title || "",
-      tagline: meta.app.tagline || "",
-      description: meta.app.description || "",
-    });
-    setParamsDirty(false);
-  };
-
-  const updateParamsField = (field, value) => {
-    setParamsDirty(true);
-    setParamsForm((prev) => ({ ...prev, [field]: value }));
-  };
-
-  const buildParamsPayload = () => ({
-    app: {
-      store_folder: paramsForm.store_folder.trim(),
-      author: paramsForm.author.trim(),
-      developer: paramsForm.developer.trim(),
-      title: paramsForm.title.trim(),
-      tagline: paramsForm.tagline.trim(),
-      description: paramsForm.description,
-    },
-  });
-
-  useEffect(() => {
-    const handler = (event) => {
-      if (event.ctrlKey && event.key.toLowerCase() === "l") {
-        event.preventDefault();
-        openAssistant(metaTarget || "app.title");
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, []);
-
-  useEffect(() => {
-    if (!assistantOpen) {
-      return;
-    }
-    const handler = (event) => {
-      if (event.key === "Escape") {
-        setAssistantOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [assistantOpen]);
-
-  useEffect(() => {
-    assistantEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [assistantMessages, assistantLoading]);
-
-  const openAssistant = (targetHint) => {
-    if (targetHint) {
-      setAssistantTarget(targetHint);
-    }
-    setAssistantOpen(true);
-  };
-
-  const resetAssistantThread = () => {
-    setAssistantMessages([]);
-    setAssistantInput("");
-    setAssistantLastText("");
-    setAssistantContext("");
-  };
-
-  const saveLLMSettings = async () => {
-    const formData = new FormData();
-    formData.append("base_url", llmBaseUrl);
-    if (llmApiKey && llmApiKey !== "********") {
-      formData.append("api_key", llmApiKey);
-    }
-    formData.append("model", model);
-    formData.append("temperature", temperature);
-    try {
-      const data = await requestJSON("/api/llm", { method: "POST", body: formData });
-      setState((prev) => ({ ...prev, llm: data.llm }));
-      showStatus("LLM settings saved.");
-    } catch (error) {
-      showStatus(error.message);
-    }
-  };
-
-  const loadCompose = async () => {
-    if (!fileRef.current || !fileRef.current.files.length) {
-      showStatus("Please choose a docker-compose file.");
-      return;
-    }
-    try {
-      const formData = new FormData();
-      formData.append("file", fileRef.current.files[0]);
-      const data = await requestJSON("/api/compose", { method: "POST", body: formData });
-      showStatus(data.message || "Compose loaded.");
-      seedParamsFromMeta(data.meta);
-      refreshState();
-    } catch (error) {
-      showStatus(error.message);
-    }
-  };
-
-  const loadComposeText = async () => {
-    if (!composeText.trim()) {
-      showStatus("Paste a docker-compose YAML first.");
-      return;
-    }
-    try {
-      const data = await requestJSON("/api/compose-text", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: composeText }),
-      });
-      showStatus(data.message || "Compose loaded.");
-      seedParamsFromMeta(data.meta);
-      refreshState();
-    } catch (error) {
-      showStatus(error.message);
-    }
-  };
-
-  const fillMetadata = async () => {
-    if (!state.has_compose) {
-      showStatus("Load a compose file first.");
-      return;
-    }
-    if (!useLLM && !useParams) {
-      showStatus("Select LLM or Params.");
-      return;
-    }
-    const fillData = new FormData();
-    fillData.append("use_llm", useLLM ? "true" : "false");
-    fillData.append("use_params", useParams ? "true" : "false");
-    if (useLLM) {
-      fillData.append("model", model);
-      fillData.append("temperature", temperature);
-      if (llmBaseUrl) {
-        fillData.append("llm_base_url", llmBaseUrl);
-      }
-      if (llmApiKey && llmApiKey !== "********") {
-        fillData.append("llm_api_key", llmApiKey);
-      }
-    }
-    if (useParams) {
-      if (paramsFileRef.current && paramsFileRef.current.files.length) {
-        fillData.append("params_file", paramsFileRef.current.files[0]);
-      } else {
-        fillData.append("params_json", JSON.stringify(buildParamsPayload()));
-      }
-    }
-    try {
-      await requestJSON("/api/meta/fill", { method: "POST", body: fillData });
-      const modeLabel = [useLLM ? "LLM" : null, useParams ? "params" : null]
-        .filter(Boolean)
-        .join(" + ");
-      showStatus(`Metadata updated (${modeLabel}).`);
-      refreshState();
-    } catch (error) {
-      showStatus(error.message);
-    }
-  };
-
-  const renderCompose = async () => {
-    try {
-      await requestJSON("/api/render", { method: "POST" });
-      showStatus("x-casaos rendered.");
-      refreshState();
-    } catch (error) {
-      showStatus(error.message);
-    }
-  };
-
-  const updateMetaField = async () => {
-    if (!metaTarget || !metaValue) {
-      showStatus("Target and value are required.");
-      return;
-    }
-    const endpoint =
-      metaMode === "multi" ? "/api/stage2/update-multi" : "/api/stage2/update-single";
-    try {
-      await requestJSON(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target: metaTarget, value: metaValue }),
-      });
-      showStatus("Metadata updated.");
-      setMetaValue("");
-      refreshState();
-    } catch (error) {
-      showStatus(error.message);
-    }
-  };
-
-  const exportCompose = async () => {
-    try {
-      const text = await requestText("/api/export", { method: "POST" });
-      setExportOutput(text);
-      showStatus("CasaOS YAML generated.");
-    } catch (error) {
-      showStatus(error.message);
-    }
-  };
-
-  const sendAssistant = async () => {
-    if (!assistantInput.trim()) {
-      showStatus("Enter a question or rewrite request for the copilot.");
-      return;
-    }
-    const userMessage = { role: "user", content: assistantInput.trim() };
-    const nextMessages = [...assistantMessages, userMessage];
-    setAssistantMessages(nextMessages);
-    setAssistantInput("");
-    setAssistantLoading(true);
-    try {
-      const data = await requestJSON("/api/assistant/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: nextMessages, target: assistantTarget || null }),
-      });
-      const assistantMessage = { role: "assistant", content: data.message };
-      setAssistantMessages((prev) => [...prev, assistantMessage]);
-      setAssistantLastText(data.message);
-      setAssistantContext(data.context || "");
-    } catch (error) {
-      showStatus(error.message);
-    } finally {
-      setAssistantLoading(false);
-    }
-  };
-
-  const applyAssistantMulti = async () => {
-    if (!assistantTarget) {
-      showStatus("Select a target for the assistant.");
-      return;
-    }
-    if (!assistantLastText) {
-      showStatus("Ask the assistant for a suggestion first.");
-      return;
-    }
-    try {
-      await requestJSON("/api/stage2/update-multi", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target: assistantTarget, value: assistantLastText }),
-      });
-      showStatus("Assistant text copied to every language.");
-      refreshState();
-    } catch (error) {
-      showStatus(error.message);
-    }
-  };
-
-  const applyAssistantSingle = async () => {
-    if (!assistantTarget) {
-      showStatus("Select a target for the assistant.");
-      return;
-    }
-    if (!assistantLastText) {
-      showStatus("Ask the assistant for a suggestion first.");
-      return;
-    }
-    try {
-      await requestJSON("/api/stage2/update-single", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target: assistantTarget, value: assistantLastText }),
-      });
-      showStatus("Assistant text saved to single-language field.");
-      refreshState();
-    } catch (error) {
-      showStatus(error.message);
-    }
-  };
-
-  // 版本管理方法
-  const loadVersions = async () => {
-    setVersionsLoading(true);
-    try {
-      const data = await requestJSON("/api/versions");
-      setVersions(data.versions || []);
-    } catch (error) {
-      showStatus(error.message);
-    } finally {
-      setVersionsLoading(false);
-    }
-  };
-
-  const rollbackVersion = async (versionName) => {
-    if (!versionName) {
-      showStatus("Please select a version to rollback.");
-      return;
-    }
-    try {
-      await requestJSON("/api/versions/rollback", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ version: versionName }),
-      });
-      showStatus(`Rolled back to: ${versionName}`);
-      refreshState();
-      loadVersions();
-    } catch (error) {
-      showStatus(error.message);
-    }
-  };
-
-  const loadDiff = async () => {
-    if (!state.has_compose) {
-      showStatus("Load a compose file first.");
-      return;
-    }
-    setDiffLoading(true);
-    try {
-      const data = await requestJSON("/api/diff");
-      setDiffInfo(data);
-      if (!data.has_changes) {
-        showStatus("No changes detected.");
-      }
-    } catch (error) {
-      showStatus(error.message);
-    } finally {
-      setDiffLoading(false);
-    }
-  };
-
-  const runIncrementalUpdate = async () => {
-    if (!state.has_compose) {
-      showStatus("Load a compose file first.");
-      return;
-    }
-    setIncrementalLoading(true);
-    try {
-      const data = await requestJSON("/api/incremental", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          force_regenerate: false,
-          params: null,
-        }),
-      });
-      showStatus(data.message || "Incremental update completed.");
-      refreshState();
-      loadVersions();
-      setDiffInfo(null);
-    } catch (error) {
-      showStatus(error.message);
-    } finally {
-      setIncrementalLoading(false);
-    }
-  };
-
-  // 初始化时加载版本
-  useEffect(() => {
-    loadVersions();
-  }, []);
-
-  return (
-    <div>
-      <header className="hero">
-        <div>
-          <div className="badge">Visual Editor</div>
-          <h1>CasaOS Compose Visual Editor</h1>
-          <small>
-            Upload a compose file and edit metadata visually.
-            Multi-language values are always updated across every locale.
-          </small>
-        </div>
-        <div className="hero-actions">
-          <button className="ghost" onClick={refreshState}>
-            Refresh
-          </button>
-        </div>
-      </header>
-
-      <StatusBanner message={status} />
-
-      <div className="layout">
-        <div className="workflow-track">
-          <div className="workflow-row">
-            <Panel
-              className="step step-1"
-              eyebrow="Step 1"
-              title="Load Compose"
-              intro="Upload or paste a docker-compose.yml file to begin."
-              actions={
-                <div className="status-row">
-                  <span className={`pill ${state.has_compose ? "active" : ""}`}>Compose</span>
-                  <span className={`pill ${state.has_meta ? "active" : ""}`}>Meta</span>
-                  <span className={`pill ${state.has_stage2 ? "active" : ""}`}>Rendered</span>
-                </div>
-              }
-            >
-              <label>docker-compose file</label>
-              <input ref={fileRef} type="file" accept=".yml,.yaml" />
-              <div className="panel-inline">
-                <button onClick={loadCompose}>Load Compose</button>
-                <button className="ghost" onClick={refreshState}>
-                  Refresh State
-                </button>
-              </div>
-              <div className="mode-pill">Paste compose YAML</div>
-              <label>compose text</label>
-              <textarea
-                value={composeText}
-                onChange={(event) => setComposeText(event.target.value)}
-                placeholder="Paste docker-compose.yml content here..."
-              />
-              <button onClick={loadComposeText}>Load Compose Text</button>
-            </Panel>
-
-            <div className="workflow-connector" aria-hidden="true" />
-
-            <Panel
-              className="step step-2"
-              eyebrow="Step 2"
-              title="Fill Metadata"
-              intro="Use LLM and/or params to fill metadata before rendering."
-            >
-              <div className="mode-pill">
-                Plan:{" "}
-                {useLLM && useParams
-                  ? "LLM + Params"
-                  : useLLM
-                  ? "LLM only"
-                  : useParams
-                  ? "Params only"
-                  : "Select options"}
-              </div>
-              <div className="panel-inline">
-                <div className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={useLLM}
-                    onChange={(event) => setUseLLM(event.target.checked)}
-                  />
-                  <span>Use LLM</span>
-                </div>
-                <div className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={useParams}
-                    onChange={(event) => setUseParams(event.target.checked)}
-                  />
-                  <span>Use Params (core fields)</span>
-                </div>
-              </div>
-              {useLLM && (
-                <div className="collapsible">
-                  <button
-                    type="button"
-                    className="collapsible-trigger"
-                    aria-expanded={llmSettingsOpen}
-                    onClick={() => setLlmSettingsOpen((prev) => !prev)}
-                  >
-                    <span>LLM Settings</span>
-                    <span className="collapsible-meta">
-                      {model} / temp {temperature}
-                    </span>
-                    <span className="chevron" aria-hidden="true">
-                      v
-                    </span>
-                  </button>
-                  <div className={`collapsible-body ${llmSettingsOpen ? "open" : ""}`}>
-                    <div className="collapsible-inner">
-                      <label>LLM Base URL</label>
-                      <input
-                        type="text"
-                        placeholder="https://api.openai.com/v1"
-                        value={llmBaseUrl}
-                        onChange={(event) => setLlmBaseUrl(event.target.value)}
-                      />
-                      <label>LLM API Key</label>
-                      <input
-                        type="password"
-                        placeholder="sk-..."
-                        value={llmApiKey}
-                        onChange={(event) => setLlmApiKey(event.target.value)}
-                      />
-                      <label>Model</label>
-                      <input
-                        type="text"
-                        value={model}
-                        onChange={(event) => setModel(event.target.value)}
-                      />
-                      <label>Temperature</label>
-                      <input
-                        type="number"
-                        min="0"
-                        max="1"
-                        step="0.1"
-                        value={temperature}
-                        onChange={(event) => setTemperature(event.target.value)}
-                      />
-                      <button className="ghost" onClick={saveLLMSettings}>
-                        Save LLM Settings
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-              {useParams && (
-                <div className="collapsible">
-                  <button
-                    type="button"
-                    className="collapsible-trigger"
-                    aria-expanded={paramsEditorOpen}
-                    onClick={() => setParamsEditorOpen((prev) => !prev)}
-                  >
-                    <span>Params (core fields)</span>
-                    <span className="collapsible-meta">
-                      {paramsForm.title || "customize"}
-                    </span>
-                    <span className="chevron" aria-hidden="true">
-                      v
-                    </span>
-                  </button>
-                  <div className={`collapsible-body ${paramsEditorOpen ? "open" : ""}`}>
-                    <div className="collapsible-inner">
-                      <label>Store Folder</label>
-                      <input
-                        type="text"
-                        placeholder="RagFlow"
-                        value={paramsForm.store_folder}
-                        onChange={(event) => updateParamsField("store_folder", event.target.value)}
-                      />
-                      <label>Author</label>
-                      <input
-                        type="text"
-                        value={paramsForm.author}
-                        onChange={(event) => updateParamsField("author", event.target.value)}
-                      />
-                      <label>Developer</label>
-                      <input
-                        type="text"
-                        value={paramsForm.developer}
-                        onChange={(event) => updateParamsField("developer", event.target.value)}
-                      />
-                      <label>Title</label>
-                      <input
-                        type="text"
-                        value={paramsForm.title}
-                        onChange={(event) => updateParamsField("title", event.target.value)}
-                      />
-                      <label>Tagline</label>
-                      <input
-                        type="text"
-                        value={paramsForm.tagline}
-                        onChange={(event) => updateParamsField("tagline", event.target.value)}
-                      />
-                      <label>Description</label>
-                      <textarea
-                        value={paramsForm.description}
-                        onChange={(event) => updateParamsField("description", event.target.value)}
-                        placeholder="Short introduction for the app."
-                      />
-                      <label>params.yml (optional, overrides form)</label>
-                      <input ref={paramsFileRef} type="file" accept=".yml,.yaml" />
-                      {paramsDirty && (
-                        <button className="ghost" onClick={() => seedParamsFromMeta(state.meta)}>
-                          Reset to inferred defaults
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-              <button onClick={fillMetadata} disabled={!state.has_compose}>
-                Run Fill
-              </button>
-            </Panel>
-
-            <div className="workflow-connector" aria-hidden="true" />
-
-            <Panel
-              className="step step-3"
-              eyebrow="Step 3"
-              title="Edit Metadata"
-              intro="Edit x-casaos fields. Multi-language updates every locale."
-            >
-              <label>Mode</label>
-              <SegmentedToggle
-                value={metaMode}
-                onChange={setMetaMode}
-                options={[
-                  { value: "multi", label: "Multi-language" },
-                  { value: "single", label: "Single-language" },
-                ]}
-              />
-              <label>Target</label>
-              <input
-                type="text"
-                value={metaTarget}
-                placeholder={
-                  metaMode === "multi" ? "app.title or service:web:port:8080" : "service:web:index"
-                }
-                onChange={(event) => setMetaTarget(event.target.value)}
-              />
-              <label>{metaMode === "multi" ? "Content" : "Value"}</label>
-              {metaMode === "multi" ? (
-                <textarea
-                  value={metaValue}
-                  onChange={(event) => setMetaValue(event.target.value)}
-                  placeholder="Describe once and it will sync to all locales."
-                />
-              ) : (
-                <input type="text" value={metaValue} onChange={(event) => setMetaValue(event.target.value)} />
-              )}
-              <div className="panel-inline">
-                <button onClick={updateMetaField}>Save Metadata</button>
-                <button className="ghost" onClick={renderCompose}>
-                  Render x-casaos
-                </button>
-              </div>
-            </Panel>
-
-            <div className="workflow-connector" aria-hidden="true" />
-
-            <Panel
-              className="step step-4"
-              eyebrow="Step 4"
-              title="Export YAML"
-              intro="Generate the final compose file with x-casaos."
-            >
-              <button onClick={exportCompose}>Export CasaOS YAML</button>
-              <textarea
-                value={exportOutput}
-                onChange={(event) => setExportOutput(event.target.value)}
-                placeholder="CasaOS YAML preview..."
-              />
-            </Panel>
-
-            <div className="workflow-connector" aria-hidden="true" />
-
-            <Panel
-              className="step step-5"
-              eyebrow="Step 5"
-              title="Version Control"
-              intro="Manage versions and run incremental updates to save AI costs."
-              actions={
-                <button className="ghost" onClick={loadVersions} disabled={versionsLoading}>
-                  {versionsLoading ? "Loading..." : "Refresh"}
-                </button>
-              }
-            >
-              <div className="panel-inline">
-                <button onClick={loadDiff} disabled={diffLoading || !state.has_compose}>
-                  {diffLoading ? "Analyzing..." : "Show Diff"}
-                </button>
-                <button onClick={runIncrementalUpdate} disabled={incrementalLoading || !state.has_compose}>
-                  {incrementalLoading ? "Updating..." : "Run Incremental"}
-                </button>
-              </div>
-
-              {diffInfo && diffInfo.has_changes && (
-                <div className="diff-summary">
-                  <strong>Changes Detected:</strong>
-                  {diffInfo.added_services && diffInfo.added_services.length > 0 && (
-                    <div style={{ marginTop: "0.5rem" }}>
-                      <span style={{ color: "var(--brand)" }}>+ Added services:</span>{" "}
-                      {diffInfo.added_services.join(", ")}
-                    </div>
-                  )}
-                  {diffInfo.removed_services && diffInfo.removed_services.length > 0 && (
-                    <div style={{ marginTop: "0.5rem" }}>
-                      <span style={{ color: "#ef4444" }}>- Removed services:</span>{" "}
-                      {diffInfo.removed_services.join(", ")}
-                    </div>
-                  )}
-                  {diffInfo.field_changes && diffInfo.field_changes.length > 0 && (
-                    <div style={{ marginTop: "0.5rem" }}>
-                      <span style={{ color: "var(--accent)" }}>~ {diffInfo.field_changes.length} field changes</span>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {versions.length > 0 ? (
-                <div style={{ marginTop: "1rem" }}>
-                  <label>History ({versions.length} versions)</label>
-                  <div style={{ maxHeight: "200px", overflowY: "auto", marginTop: "0.5rem" }}>
-                    {versions.map((ver, idx) => (
-                      <div
-                        key={idx}
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                          padding: "0.5rem",
-                          background: "var(--panel-soft)",
-                          borderRadius: "8px",
-                          marginBottom: "0.5rem",
-                        }}
-                      >
-                        <div style={{ fontSize: "0.85rem" }}>
-                          <div style={{ fontWeight: "500" }}>{ver.name}</div>
-                          <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
-                            {ver.timestamp || "-"} · {ver.size || "-"}
-                          </div>
-                        </div>
-                        <button
-                          className="ghost"
-                          style={{ padding: "0.4rem 0.8rem", fontSize: "0.8rem" }}
-                          onClick={() => rollbackVersion(ver.name)}
-                        >
-                          Rollback
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div style={{ textAlign: "center", padding: "2rem 1rem", color: "var(--muted)" }}>
-                  <div style={{ fontSize: "0.9rem" }}>No version history yet</div>
-                  <div style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-                    Run incremental update to create version snapshots
-                  </div>
-                </div>
-              )}
-            </Panel>
-          </div>
-        </div>
-      </div>
-
-      <AssistantOverlay
-        open={assistantOpen}
-        target={assistantTarget}
-        context={assistantContext}
-        messages={assistantMessages}
-        input={assistantInput}
-        loading={assistantLoading}
-        onTargetChange={setAssistantTarget}
-        onInputChange={setAssistantInput}
-        onSend={sendAssistant}
-        onReset={resetAssistantThread}
-        onClose={() => setAssistantOpen(false)}
-        onApplyMulti={applyAssistantMulti}
-        onApplySingle={applyAssistantSingle}
-        endRef={assistantEndRef}
-      />
-    </div>
-  );
-}
-
-const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(<App />);
+  bootstrap();
+})();

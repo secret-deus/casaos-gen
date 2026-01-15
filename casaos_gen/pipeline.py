@@ -155,6 +155,7 @@ def fill_meta_with_llm(
     client: Optional[object] = None,
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
+    prompt_instructions: Optional[str] = None,
 ) -> CasaOSMeta:
     return run_stage1_llm(
         meta,
@@ -163,6 +164,7 @@ def fill_meta_with_llm(
         client=client,
         api_key=api_key,
         base_url=base_url,
+        prompt_instructions=prompt_instructions,
     )
 
 

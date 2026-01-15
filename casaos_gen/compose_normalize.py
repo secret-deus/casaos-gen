@@ -4,14 +4,18 @@ This module focuses on rewriting *service runtime fields* (ports/volumes) and
 filling predictable app media links (icon/thumbnail/screenshot_link) when they
 are missing.
 
-It intentionally does NOT touch x-casaos descriptions/content (beyond the media
-links) so you can run it on already-generated YAML without losing metadata.
+Additionally, it applies lightweight AppStore conventions that are safe to
+auto-fix (restart policy defaults, container_name defaults, and keeping
+top-level name/x-casaos.main/port_map consistent when present). It intentionally
+does NOT rewrite x-casaos descriptions.
 """
 
 from __future__ import annotations
 
 import copy
+import hashlib
 import logging
+import random
 import re
 from typing import Any, Dict, Optional, Tuple
 
@@ -40,19 +44,25 @@ def normalize_compose_for_appstore(
     - Volumes are converted into bind mounts under /DATA/AppData/$AppID/...
     - Top-level named volume definitions are removed if unused after conversion.
     - App media links are filled (only if missing/empty) under x-casaos.
+    - Service names are lowercased (and depends_on updated) when safe.
+    - restart/container_name defaults are applied when missing.
+    - If x-casaos exists, ensure name/main/port_map stay consistent.
     """
     data: Dict[str, Any] = copy.deepcopy(compose_data)
     _ensure_app_media_links(data, store_folder=store_folder)
 
     services = data.get("services") or {}
     if isinstance(services, dict):
+        services = _lowercase_service_names(data)
+        main_service = _ensure_compose_name_and_main(data)
         app_data_root = build_app_data_root(app_id_var)
         used_appdata_sources: set[str] = set()
         for name, svc in services.items():
             if not isinstance(svc, dict):
                 continue
-            if not str(svc.get("restart") or "").strip():
-                svc["restart"] = "unless-stopped"
+            _ensure_service_defaults(name, svc)
+            _ensure_image_tag(name, svc)
+            _normalize_service_environment(svc)
             _normalize_service_ports(svc)
             _normalize_service_volumes(
                 name,
@@ -60,10 +70,238 @@ def normalize_compose_for_appstore(
                 app_data_root=app_data_root,
                 used_appdata_sources=used_appdata_sources,
             )
+        if main_service:
+            _ensure_main_service_port_map(data, main_service)
     data["services"] = services
 
     _drop_top_level_volumes_if_unused(data)
     return data
+
+
+def _lowercase_service_names(data: Dict[str, Any]) -> Dict[str, Any]:
+    services = data.get("services") or {}
+    if not isinstance(services, dict) or not services:
+        return services if isinstance(services, dict) else {}
+
+    normalized: Dict[str, Any] = {}
+    rename_map: Dict[str, str] = {}
+    collisions: Dict[str, list[str]] = {}
+
+    for name, svc in services.items():
+        if not isinstance(name, str):
+            normalized[name] = svc
+            continue
+        lowered = name.strip().lower()
+        if not lowered:
+            normalized[name] = svc
+            continue
+        if lowered in normalized and name != lowered:
+            collisions.setdefault(lowered, []).append(name)
+            continue
+        normalized[lowered] = svc
+        if name != lowered:
+            rename_map[name] = lowered
+
+    if collisions:
+        logger.warning("Service name lowercasing skipped due to collisions: %s", collisions)
+        return services
+
+    if rename_map:
+        _rewrite_depends_on(normalized, rename_map)
+        data["services"] = normalized
+    return normalized
+
+
+def _rewrite_depends_on(services: Dict[str, Any], rename_map: Dict[str, str]) -> None:
+    for svc in services.values():
+        if not isinstance(svc, dict):
+            continue
+        depends = svc.get("depends_on")
+        if isinstance(depends, list):
+            svc["depends_on"] = [rename_map.get(str(item), item) for item in depends]
+            continue
+        if isinstance(depends, dict):
+            rewritten = {}
+            for key, value in depends.items():
+                new_key = rename_map.get(str(key), key)
+                rewritten[new_key] = value
+            svc["depends_on"] = rewritten
+
+
+def _ensure_compose_name_and_main(data: Dict[str, Any]) -> str:
+    services = data.get("services") or {}
+    service_names = list(services.keys()) if isinstance(services, dict) else []
+
+    x_casaos = data.get("x-casaos")
+    if not isinstance(x_casaos, dict):
+        x_casaos = None
+
+    candidates = []
+    if x_casaos and isinstance(x_casaos.get("main"), str) and x_casaos.get("main").strip():
+        candidates.append(x_casaos["main"])
+    if isinstance(data.get("name"), str) and str(data.get("name")).strip():
+        candidates.append(str(data.get("name")))
+    if service_names:
+        candidates.append(str(service_names[0]))
+
+    main = next((str(item).strip() for item in candidates if str(item).strip()), "")
+    main = main.lower()
+    if not main:
+        return ""
+
+    if isinstance(services, dict) and main not in services:
+        logger.warning("Main service '%s' not found; defaulting to first service.", main)
+        main = str(service_names[0]).strip().lower() if service_names else ""
+        if not main:
+            return ""
+
+    data["name"] = main
+    if x_casaos is not None:
+        x_casaos["main"] = main
+        data["x-casaos"] = x_casaos
+    return main
+
+
+def _ensure_service_defaults(service_name: str, service: Dict[str, Any]) -> None:
+    if not str(service.get("restart") or "").strip():
+        service["restart"] = "unless-stopped"
+    if not str(service.get("container_name") or "").strip():
+        service["container_name"] = service_name
+
+
+def _ensure_image_tag(service_name: str, service: Dict[str, Any]) -> None:
+    image = service.get("image")
+    if not isinstance(image, str):
+        return
+    cleaned = image.strip()
+    if not cleaned:
+        return
+    if "@" in cleaned:
+        return
+    if not _image_has_tag(cleaned):
+        logger.warning("Service %s image has no tag; defaulting to ':latest'.", service_name)
+        service["image"] = f"{cleaned}:latest"
+        return
+    if cleaned.rsplit(":", 1)[-1].lower() == "latest":
+        logger.warning("Service %s image uses ':latest'; prefer a pinned version.", service_name)
+
+
+def _image_has_tag(image: str) -> bool:
+    # If the final ':' appears after the final '/', treat it as a tag separator.
+    last_slash = image.rfind("/")
+    last_colon = image.rfind(":")
+    return last_colon > last_slash
+
+
+def _normalize_service_environment(service: Dict[str, Any]) -> None:
+    env = service.get("environment")
+    if isinstance(env, dict):
+        _normalize_env_mapping(env)
+        return
+    if isinstance(env, list):
+        service["environment"] = _normalize_env_list(env)
+
+
+def _normalize_env_mapping(env: Dict[str, Any]) -> None:
+    for key, replacement in (("TZ", "$TZ"), ("PUID", "$PUID"), ("PGID", "$PGID")):
+        if key in env:
+            env[key] = replacement
+
+
+def _normalize_env_list(env: list[Any]) -> list[Any]:
+    normalized: list[Any] = []
+    for entry in env:
+        if not isinstance(entry, str) or "=" not in entry:
+            normalized.append(entry)
+            continue
+        key, _, value = entry.partition("=")
+        key = key.strip()
+        if key == "TZ":
+            normalized.append("TZ=$TZ")
+            continue
+        if key == "PUID":
+            normalized.append("PUID=$PUID")
+            continue
+        if key == "PGID":
+            normalized.append("PGID=$PGID")
+            continue
+        normalized.append(entry)
+    return normalized
+
+
+def _ensure_main_service_port_map(data: Dict[str, Any], main_service: str) -> None:
+    x_casaos = data.get("x-casaos")
+    if not isinstance(x_casaos, dict):
+        return
+    services = data.get("services")
+    if not isinstance(services, dict):
+        return
+    service = services.get(main_service)
+    if not isinstance(service, dict):
+        return
+    ports = service.get("ports")
+    if not isinstance(ports, list) or not ports:
+        return
+
+    primary = next((entry for entry in ports if isinstance(entry, dict)), None)
+    if not isinstance(primary, dict):
+        return
+
+    target = primary.get("target")
+    target_text = str(target).strip() if target is not None else ""
+    published = str(primary.get("published") or "").strip()
+
+    used_ports = _collect_published_ports(services)
+    seed = hashlib.sha256(f"{main_service}::port_map".encode("utf-8")).hexdigest()
+    rng = random.Random(int(seed[:8], 16))
+
+    if (
+        (not published)
+        or (published == target_text)
+        or (not published.isdigit())
+        or int(published) <= 0
+        or int(published) >= 30000
+    ):
+        allocated = _allocate_random_port(rng, used_ports)
+        primary["published"] = str(allocated)
+        published = str(allocated)
+
+    x_casaos["port_map"] = published
+
+
+def _collect_published_ports(services: Dict[str, Any]) -> set[int]:
+    used: set[int] = set()
+    for svc in services.values():
+        if not isinstance(svc, dict):
+            continue
+        ports = svc.get("ports")
+        if not isinstance(ports, list):
+            continue
+        for entry in ports:
+            if not isinstance(entry, dict):
+                continue
+            published = entry.get("published")
+            if published is None:
+                continue
+            text = str(published).strip()
+            if text.isdigit():
+                used.add(int(text))
+    return used
+
+
+def _allocate_random_port(rng: random.Random, used_ports: set[int]) -> int:
+    # CasaOS AppStore templates typically use a random port < 30000.
+    for _ in range(2000):
+        candidate = rng.randint(20000, 29999)
+        if candidate not in used_ports:
+            used_ports.add(candidate)
+            return candidate
+    # Fallback: linear probe (still < 30000)
+    for candidate in range(20000, 30000):
+        if candidate not in used_ports:
+            used_ports.add(candidate)
+            return candidate
+    return 20000
 
 
 def _ensure_app_media_links(data: Dict[str, Any], store_folder: Optional[str]) -> None:
