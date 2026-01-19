@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from .constants import CDN_BASE
+from .constants import CDN_BASE, STORE_FOLDER_PLACEHOLDER
 from .i18n import DEFAULT_LANGUAGES
 from .infer import infer_author, infer_category, infer_main_port, infer_main_service
 from .parser import build_xcasaos_template, extract_envs, extract_ports, extract_volumes
@@ -55,6 +55,12 @@ def _as_list(value: Any, default: List[str]) -> List[str]:
     return list(default)
 
 
+def _replace_store_folder_placeholder(value: str, store_folder: str) -> str:
+    if STORE_FOLDER_PLACEHOLDER not in value:
+        return value
+    return value.replace(STORE_FOLDER_PLACEHOLDER, store_folder)
+
+
 def build_template_compose(
     compose_data: Dict[str, Any],
     params: Optional[Dict[str, Any]] = None,
@@ -77,10 +83,11 @@ def build_template_compose(
     app_name = str(compose_data.get("name") or main_service or "")
     store_folder = str(params_app.get("store_folder") or "<store_folder>")
 
-    icon = str(
-        params_app.get("icon")
-        or f"{CDN_BASE}/{store_folder}/icon.png"
-    )
+    icon_param = str(params_app.get("icon") or "").strip()
+    if icon_param:
+        icon = _replace_store_folder_placeholder(icon_param, store_folder)
+    else:
+        icon = f"{CDN_BASE}/{store_folder}/icon.png"
 
     screenshot_link = (
         params_app.get("screenshot_link")
@@ -94,10 +101,15 @@ def build_template_compose(
             f"{CDN_BASE}/{store_folder}/screenshot-3.png",
         ],
     )
+    screenshot_links = [
+        _replace_store_folder_placeholder(str(item), store_folder) for item in screenshot_links
+    ]
 
     thumbnail = params_app.get("thumbnail")
     if thumbnail is None:
         thumbnail = f"{CDN_BASE}/{store_folder}/thumbnail.png"
+    else:
+        thumbnail = _replace_store_folder_placeholder(str(thumbnail), store_folder)
 
     architectures = _as_list(params_app.get("architectures"), ["amd64", "arm64"])
 

@@ -251,6 +251,24 @@ def _ensure_main_service_port_map(data: Dict[str, Any], main_service: str) -> No
     target_text = str(target).strip() if target is not None else ""
     published = str(primary.get("published") or "").strip()
 
+    requested_port_map = str(x_casaos.get("port_map") or "").strip()
+    if requested_port_map and requested_port_map != published:
+        if requested_port_map.isdigit():
+            port_value = int(requested_port_map)
+            if 0 < port_value < 65536:
+                primary["published"] = requested_port_map
+                x_casaos["port_map"] = requested_port_map
+                return
+        else:
+            primary["published"] = requested_port_map
+            x_casaos["port_map"] = requested_port_map
+            return
+
+    if published and not published.isdigit():
+        # Respect template variables like "$PORT" and keep x-casaos in sync.
+        x_casaos["port_map"] = published
+        return
+
     used_ports = _collect_published_ports(services)
     seed = hashlib.sha256(f"{main_service}::port_map".encode("utf-8")).hexdigest()
     rng = random.Random(int(seed[:8], 16))
@@ -311,12 +329,34 @@ def _ensure_app_media_links(data: Dict[str, Any], store_folder: Optional[str]) -
 
     folder = (store_folder or "").strip() or _infer_store_folder(data) or STORE_FOLDER_PLACEHOLDER
 
-    if not str(x_casaos.get("icon") or "").strip():
+    icon_value = str(x_casaos.get("icon") or "")
+    if STORE_FOLDER_PLACEHOLDER in icon_value:
+        x_casaos["icon"] = icon_value.replace(STORE_FOLDER_PLACEHOLDER, folder)
+    elif not icon_value.strip():
         x_casaos["icon"] = build_cdn_icon_url(folder)
-    if not str(x_casaos.get("thumbnail") or "").strip():
+
+    thumbnail_value = str(x_casaos.get("thumbnail") or "")
+    if STORE_FOLDER_PLACEHOLDER in thumbnail_value:
+        x_casaos["thumbnail"] = thumbnail_value.replace(STORE_FOLDER_PLACEHOLDER, folder)
+    elif not thumbnail_value.strip():
         x_casaos["thumbnail"] = build_cdn_thumbnail_url(folder)
 
     screenshots = x_casaos.get("screenshot_link")
+    if isinstance(screenshots, list):
+        replaced = []
+        changed = False
+        for item in screenshots:
+            text = "" if item is None else str(item)
+            if STORE_FOLDER_PLACEHOLDER in text:
+                next_text = text.replace(STORE_FOLDER_PLACEHOLDER, folder)
+                changed = changed or next_text != text
+                replaced.append(next_text)
+            else:
+                replaced.append(text)
+        if changed:
+            x_casaos["screenshot_link"] = replaced
+            screenshots = replaced
+
     if not isinstance(screenshots, list) or not any(str(item).strip() for item in screenshots):
         x_casaos["screenshot_link"] = build_cdn_screenshot_urls(folder)
 

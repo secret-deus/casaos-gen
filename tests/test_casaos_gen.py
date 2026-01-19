@@ -7,6 +7,7 @@ from casaos_gen.compose_normalize import normalize_compose_for_appstore
 from casaos_gen.constants import CDN_BASE
 from casaos_gen.i18n import load_translation_map, wrap_multilang
 from casaos_gen.llm_stage1 import build_stage1_prompt
+from casaos_gen.pipeline import apply_params_to_meta
 from casaos_gen.parser import build_casaos_meta
 from casaos_gen.template_stage import build_params_skeleton, build_template_compose
 from casaos_gen.yaml_out import build_final_compose, dump_yaml, write_compose_file
@@ -56,6 +57,23 @@ class CasaOSParserTests(unittest.TestCase):
         meta = build_casaos_meta(compose)
         self.assertEqual(meta.app.main, "web")
         self.assertEqual(meta.app.port_map, "8888")
+
+    def test_apply_params_substitutes_store_folder_placeholders(self):
+        meta = build_casaos_meta(self.compose)
+        params = {
+            "app": {
+                "store_folder": "NocoDB",
+                "icon": f"{CDN_BASE}/<store_folder>/icon.png",
+                "thumbnail": f"{CDN_BASE}/<store_folder>/thumbnail.png",
+                "screenshot_link": [
+                    f"{CDN_BASE}/<store_folder>/screenshot-1.png",
+                ],
+            }
+        }
+        out = apply_params_to_meta(meta, params)
+        self.assertEqual(out.app.icon, f"{CDN_BASE}/NocoDB/icon.png")
+        self.assertEqual(out.app.thumbnail, f"{CDN_BASE}/NocoDB/thumbnail.png")
+        self.assertEqual(out.app.screenshot_link[0], f"{CDN_BASE}/NocoDB/screenshot-1.png")
 
 
 class CasaOSI18NTests(unittest.TestCase):
@@ -272,6 +290,36 @@ class CasaOSComposeNormalizeTests(unittest.TestCase):
         self.assertEqual(
             out["x-casaos"]["screenshot_link"][0], f"{CDN_BASE}/NocoDB/screenshot-1.png"
         )
+
+    def test_normalize_replaces_store_folder_placeholders_in_media_links(self):
+        compose = {
+            "services": {"web": {"image": "nginx"}},
+            "x-casaos": {
+                "title": {"en_US": "nocodb"},
+                "icon": f"{CDN_BASE}/<store_folder>/icon.png",
+                "thumbnail": f"{CDN_BASE}/<store_folder>/thumbnail.png",
+                "screenshot_link": [
+                    f"{CDN_BASE}/<store_folder>/screenshot-1.png",
+                    f"{CDN_BASE}/<store_folder>/screenshot-2.png",
+                ],
+            },
+        }
+        out = normalize_compose_for_appstore(compose, store_folder="NocoDB")
+        self.assertEqual(out["x-casaos"]["icon"], f"{CDN_BASE}/NocoDB/icon.png")
+        self.assertEqual(out["x-casaos"]["thumbnail"], f"{CDN_BASE}/NocoDB/thumbnail.png")
+        self.assertEqual(out["x-casaos"]["screenshot_link"][0], f"{CDN_BASE}/NocoDB/screenshot-1.png")
+
+    def test_normalize_uses_explicit_port_map_when_overriding_published(self):
+        compose = {
+            "services": {
+                "app": {"image": "nginx:latest", "ports": ["80:80"]},
+            },
+            "x-casaos": {"main": "app", "port_map": "28410"},
+        }
+        out = normalize_compose_for_appstore(compose, store_folder="demo")
+        ports = out["services"]["app"]["ports"]
+        self.assertEqual(ports[0]["published"], "28410")
+        self.assertEqual(out["x-casaos"]["port_map"], "28410")
 
     def test_normalize_converts_ports_and_volumes_to_long_syntax(self):
         compose = {

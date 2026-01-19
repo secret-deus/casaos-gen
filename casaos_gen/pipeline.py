@@ -10,7 +10,7 @@ from .i18n import DEFAULT_LANGUAGES, load_translation_map
 from .llm_stage1 import run_stage1_llm
 from .models import CasaOSMeta
 from .parser import build_casaos_meta
-from .constants import CDN_BASE
+from .constants import CDN_BASE, STORE_FOLDER_PLACEHOLDER
 from .template_stage import build_template_compose
 from .yaml_out import build_final_compose
 
@@ -58,6 +58,14 @@ def _clean_list(values: List[str]) -> List[str]:
     return [item.strip() for item in values if str(item).strip()]
 
 
+def _replace_store_folder_placeholder(value: str, store_folder: str) -> str:
+    if not store_folder:
+        return value
+    if STORE_FOLDER_PLACEHOLDER not in value:
+        return value
+    return value.replace(STORE_FOLDER_PLACEHOLDER, store_folder)
+
+
 def _apply_text_field(meta: CasaOSMeta, field: str, value: Any) -> None:
     text = _as_text(value)
     if text.strip():
@@ -102,6 +110,8 @@ def apply_params_to_meta(meta: CasaOSMeta, params: Optional[Dict[str, Any]]) -> 
         if architectures:
             meta.app.architectures = architectures
 
+        store_folder = _as_text(app_params.get("store_folder")).strip()
+
         icon_value = _as_text(app_params.get("icon"))
         thumbnail_value = _as_text(app_params.get("thumbnail"))
         screenshot_value = app_params.get("screenshot_link")
@@ -109,19 +119,20 @@ def apply_params_to_meta(meta: CasaOSMeta, params: Optional[Dict[str, Any]]) -> 
             screenshot_value = app_params.get("screenshot_links")
         screenshot_links = _clean_list(_as_list(screenshot_value))
 
-        store_folder = _as_text(app_params.get("store_folder")).strip()
         if icon_value.strip():
-            meta.app.icon = icon_value
+            meta.app.icon = _replace_store_folder_placeholder(icon_value, store_folder)
         elif store_folder:
             meta.app.icon = f"{CDN_BASE}/{store_folder}/icon.png"
 
         if thumbnail_value.strip():
-            meta.app.thumbnail = thumbnail_value
+            meta.app.thumbnail = _replace_store_folder_placeholder(thumbnail_value, store_folder)
         elif store_folder:
             meta.app.thumbnail = f"{CDN_BASE}/{store_folder}/thumbnail.png"
 
         if screenshot_links:
-            meta.app.screenshot_link = screenshot_links
+            meta.app.screenshot_link = [
+                _replace_store_folder_placeholder(item, store_folder) for item in screenshot_links
+            ]
         elif store_folder:
             meta.app.screenshot_link = [
                 f"{CDN_BASE}/{store_folder}/screenshot-1.png",
