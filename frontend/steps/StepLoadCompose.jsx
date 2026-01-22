@@ -34,7 +34,7 @@
         <Card className="stepCard">
           <CardHeader
             title="Load docker-compose"
-            subtitle="Start from an existing docker-compose.yml. We’ll parse it and build the CasaOS metadata skeleton."
+            subtitle="Load a docker-compose.yml or an already-edited CasaOS YAML (with x-casaos). We’ll parse it and prepare the server state."
             actions={
               <div className="pillRow">
                 <StatusPill tone={engine?.has_compose ? "success" : "muted"}>
@@ -55,7 +55,7 @@
                   accept=".yml,.yaml"
                   disabled={busy}
                   title="Drop compose file"
-                  description="Supports docker-compose.yml / docker-compose.yaml"
+                  description="Supports docker-compose.yml, or CasaOS output YAML with x-casaos"
                 />
                 <div className="row row--end">
                   <Button
@@ -73,7 +73,7 @@
                 <Field
                   id="compose-text"
                   label="Compose YAML"
-                  hint="Paste the full docker-compose.yml content. Empty content disables the load action."
+                  hint="Paste docker-compose.yml or CasaOS YAML. Empty content disables the load action."
                 >
                   <Textarea
                     id="compose-text"
@@ -105,4 +105,3 @@
 
   root.steps.StepLoadCompose = StepLoadCompose;
 })();
-

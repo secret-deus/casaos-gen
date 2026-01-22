@@ -23,7 +23,7 @@
     const { useEffect, useMemo, useReducer, useRef } = React;
     const { requestJSON, requestText } = rootNS.api;
     const { cx, uid, readFileAsText, copyToClipboard, clamp } = rootNS.utils;
-    const { Button, IconButton, Stepper, ToastHost } = rootNS.components;
+    const { Button, IconButton, Stepper, ToastHost, Card, CardHeader, CardBody } = rootNS.components;
     const { StepLoadCompose, StepMetadata, StepPreview, StepExport } = rootNS.steps;
 
     const STEPS = [
@@ -93,6 +93,11 @@
         savingLLM: false,
         rendering: false,
         exporting: false,
+        patchingField: false,
+      },
+      dialogs: {
+        postLoadChooserOpen: false,
+        postLoadHasStage2: false,
       },
       toasts: [],
     };
@@ -219,12 +224,32 @@
           return { ...state, toasts: state.toasts.filter((item) => item.id !== action.id) };
         }
         case "RESET_FOR_NEW_COMPOSE": {
+          const requestedStepIndex = typeof action.stepIndex === "number" ? action.stepIndex : 1;
+          const requestedUnlockedIndex =
+            typeof action.unlockedIndex === "number" ? action.unlockedIndex : requestedStepIndex;
+
+          const safeStepIndex = Math.max(0, Math.min(3, requestedStepIndex));
+          const safeUnlockedIndex = Math.max(safeStepIndex, Math.max(0, Math.min(3, requestedUnlockedIndex)));
           return {
             ...state,
             preview: { tab: "compose" },
             renderedYaml: "",
-            wizard: { stepIndex: 1, unlockedIndex: 1 },
+            dialogs: { ...state.dialogs, postLoadChooserOpen: false },
+            wizard: { stepIndex: safeStepIndex, unlockedIndex: safeUnlockedIndex },
           };
+        }
+        case "OPEN_POST_LOAD_CHOOSER": {
+          return {
+            ...state,
+            dialogs: {
+              ...state.dialogs,
+              postLoadChooserOpen: true,
+              postLoadHasStage2: Boolean(action.hasStage2),
+            },
+          };
+        }
+        case "CLOSE_POST_LOAD_CHOOSER": {
+          return { ...state, dialogs: { ...state.dialogs, postLoadChooserOpen: false } };
         }
         default:
           return state;
@@ -240,10 +265,7 @@
         if (!state.engine.has_compose) {
           return 0;
         }
-        if (state.engine.has_stage2) {
-          return 3;
-        }
-        return 2;
+        return 3;
       }, [state.engine.has_compose, state.engine.has_stage2]);
 
       const maxEnabledIndex = Math.min(engineMaxIndex, state.wizard.unlockedIndex);
@@ -339,15 +361,16 @@
       }, [state.engine.has_compose, maxEnabledIndex, state.wizard.stepIndex]);
 
       useEffect(() => {
+        const canExport = state.engine.has_compose && (state.engine.has_meta || state.engine.has_stage2);
         if (
           state.wizard.stepIndex === 3 &&
-          state.engine.has_stage2 &&
+          canExport &&
           !state.busy.exporting &&
           !String(state.renderedYaml || "").trim()
         ) {
           refreshExportYaml();
         }
-      }, [state.wizard.stepIndex, state.engine.has_stage2]);
+      }, [state.wizard.stepIndex, state.engine.has_compose, state.engine.has_meta, state.engine.has_stage2]);
 
       useEffect(
         () => () => {
@@ -388,10 +411,20 @@
           const formData = new FormData();
           formData.append("file", file);
           await requestJSON("/api/compose", { method: "POST", body: formData });
-          await syncUIState({ silent: true });
-          dispatch({ type: "UNLOCK_STEP", index: 1 });
-          dispatch({ type: "RESET_FOR_NEW_COMPOSE" });
-          pushToast({ title: "Compose loaded", message: "Compose parsed successfully.", variant: "success" });
+          firstSyncRef.current = false;
+          const data = await syncUIState({ silent: true });
+          dispatch({
+            type: "RESET_FOR_NEW_COMPOSE",
+            stepIndex: 1,
+            unlockedIndex: 3,
+          });
+          dispatch({ type: "OPEN_POST_LOAD_CHOOSER", hasStage2: Boolean(data?.has_stage2) });
+          pushToast({
+            title: "Compose loaded",
+            message: "Choose a workflow: full flow or quick update.",
+            variant: "success",
+            duration: 4200,
+          });
         } catch (error) {
           pushToast({ title: "Load failed", message: error.message, variant: "danger" });
         } finally {
@@ -412,10 +445,20 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text }),
           });
-          await syncUIState({ silent: true });
-          dispatch({ type: "UNLOCK_STEP", index: 1 });
-          dispatch({ type: "RESET_FOR_NEW_COMPOSE" });
-          pushToast({ title: "Compose loaded", message: "Compose parsed successfully.", variant: "success" });
+          firstSyncRef.current = false;
+          const data = await syncUIState({ silent: true });
+          dispatch({
+            type: "RESET_FOR_NEW_COMPOSE",
+            stepIndex: 1,
+            unlockedIndex: 3,
+          });
+          dispatch({ type: "OPEN_POST_LOAD_CHOOSER", hasStage2: Boolean(data?.has_stage2) });
+          pushToast({
+            title: "Compose loaded",
+            message: "Choose a workflow: full flow or quick update.",
+            variant: "success",
+            duration: 4200,
+          });
         } catch (error) {
           pushToast({ title: "Load failed", message: error.message, variant: "danger" });
         } finally {
@@ -516,11 +559,175 @@
         try {
           const yamlText = await requestText("/api/export", { method: "POST" });
           dispatch({ type: "SET_RENDERED_YAML", value: yamlText });
+          await syncUIState({ silent: true });
           pushToast({ title: "YAML refreshed", message: "Export updated from server.", variant: "success", duration: 2500 });
         } catch (error) {
           pushToast({ title: "Export failed", message: error.message, variant: "danger" });
         } finally {
           dispatch({ type: "SET_BUSY", key: "exporting", value: false });
+        }
+      };
+
+      const quickUpdateField = async ({ target, value, multilang, language }) => {
+        const targetValue = String(target || "").trim();
+        if (!state.engine.has_compose) {
+          pushToast({ title: "Not ready", message: "Load a compose file first.", variant: "warning" });
+          return false;
+        }
+        if (!targetValue) {
+          pushToast({ title: "Missing target", message: "Enter a field target like app.description.", variant: "warning" });
+          return false;
+        }
+
+        const isMultilang = Boolean(multilang);
+        const languageValue = String(language || "").trim();
+        if (isMultilang) {
+          const languages = Array.isArray(state.engine.languages) ? state.engine.languages : [];
+          if (languageValue && languages.length && !languages.includes(languageValue)) {
+            pushToast({
+              title: "Unknown language",
+              message: `Language '${languageValue}' is not in the server language list.`,
+              variant: "warning",
+            });
+            return false;
+          }
+        }
+        dispatch({ type: "SET_BUSY", key: "patchingField", value: true });
+        try {
+          const nextValue = String(value ?? "");
+
+          const targetParts = targetValue.split(":");
+          const isAppTarget = targetValue.startsWith("app.");
+          const isServiceMultilangTarget =
+            targetParts.length >= 4 &&
+            targetParts[0] === "service" &&
+            ["env", "port", "volume"].includes(targetParts[2]);
+          const isServiceSingleTarget = targetParts.length >= 3 && targetParts[0] === "service" && !isServiceMultilangTarget;
+
+          const appFieldPath = isAppTarget ? targetValue.slice("app.".length) : "";
+          const appMultilangFields = new Set(["title", "tagline", "description"]);
+          const appSingleFields = new Set([
+            "category",
+            "author",
+            "developer",
+            "main",
+            "port_map",
+            "scheme",
+            "index",
+            "icon",
+            "thumbnail",
+          ]);
+          const isAppMultilangTarget = isAppTarget && (appMultilangFields.has(appFieldPath) || appFieldPath.startsWith("tips."));
+          const isAppSingleTarget = isAppTarget && appSingleFields.has(appFieldPath);
+
+          if (isAppMultilangTarget && !isMultilang) {
+            pushToast({
+              title: "Wrong mode",
+              message: "This app target is multi-language. Turn on multi-language mode.",
+              variant: "warning",
+            });
+            return false;
+          }
+          if (isAppSingleTarget && isMultilang) {
+            pushToast({
+              title: "Wrong mode",
+              message: "This app target is single-language. Turn off multi-language mode.",
+              variant: "warning",
+            });
+            return false;
+          }
+
+          if (isServiceMultilangTarget && !isMultilang) {
+            pushToast({
+              title: "Wrong mode",
+              message: "This service target requires multi-language mode (env/port/volume descriptions).",
+              variant: "warning",
+            });
+            return false;
+          }
+          if (isServiceSingleTarget && isMultilang) {
+            pushToast({
+              title: "Wrong mode",
+              message: "This service target looks like a single-language path. Turn off multi-language mode.",
+              variant: "warning",
+            });
+            return false;
+          }
+
+          if (!isAppTarget && !targetValue.startsWith("service:")) {
+            pushToast({
+              title: "Invalid target",
+              message: "Target must start with app. or service:.",
+              variant: "warning",
+            });
+            return false;
+          }
+
+          const canMetaUpdateAppFields = new Set([
+            "title",
+            "tagline",
+            "description",
+            "category",
+            "author",
+            "developer",
+            "main",
+            "port_map",
+            "scheme",
+            "index",
+          ]);
+          const shouldUpdateMeta =
+            Boolean(state.engine.has_meta) &&
+            ((isAppTarget && canMetaUpdateAppFields.has(appFieldPath)) || isServiceMultilangTarget);
+
+          const shouldUpdateMetaValue = shouldUpdateMeta && !isMultilang;
+
+          if (shouldUpdateMetaValue) {
+            await requestJSON("/api/meta/update", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                target: targetValue,
+                value: nextValue,
+                propagate_all_languages: false,
+                sync_stage2: false,
+              }),
+            });
+          }
+
+          if (isMultilang) {
+            await requestJSON("/api/stage2/update-multi", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                target: targetValue,
+                value: nextValue,
+                overwrite_all_languages: true,
+                language: languageValue || undefined,
+              }),
+            });
+          } else {
+            await requestJSON("/api/stage2/update-single", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ target: targetValue, value: nextValue }),
+            });
+          }
+
+          const yamlText = await requestText("/api/export", { method: "POST" });
+          dispatch({ type: "SET_RENDERED_YAML", value: yamlText });
+          await syncUIState({ silent: true });
+          pushToast({
+            title: "Updated",
+            message: isMultilang ? `Updated ${targetValue} (LLM translated).` : `Updated ${targetValue}.`,
+            variant: "success",
+            duration: 2500,
+          });
+          return true;
+        } catch (error) {
+          pushToast({ title: "Update failed", message: error.message, variant: "danger" });
+          return false;
+        } finally {
+          dispatch({ type: "SET_BUSY", key: "patchingField", value: false });
         }
       };
 
@@ -557,7 +764,7 @@
           return state.engine.has_compose;
         }
         if (state.wizard.stepIndex === 2) {
-          return state.engine.has_stage2;
+          return state.engine.has_compose;
         }
         return true;
       }, [state.engine.has_compose, state.engine.has_stage2, state.wizard.stepIndex]);
@@ -571,9 +778,22 @@
         const next = Math.min(STEPS.length - 1, current + 1);
         dispatch({ type: "UNLOCK_STEP", index: next });
         dispatch({ type: "SET_STEP", stepIndex: next });
-        if (next === 3 && state.engine.has_stage2 && !state.renderedYaml.trim()) {
+        if (next === 3 && state.engine.has_compose && !state.renderedYaml.trim()) {
           refreshExportYaml();
         }
+      };
+
+      const postLoadHasStage2 = Boolean(state.dialogs?.postLoadHasStage2);
+      const showPostLoadChooser = Boolean(state.dialogs?.postLoadChooserOpen);
+
+      const chooseFullWorkflow = () => {
+        dispatch({ type: "CLOSE_POST_LOAD_CHOOSER" });
+        dispatch({ type: "SET_STEP", stepIndex: 1 });
+      };
+
+      const chooseQuickUpdate = () => {
+        dispatch({ type: "CLOSE_POST_LOAD_CHOOSER" });
+        dispatch({ type: "SET_STEP", stepIndex: 3 });
       };
 
       const footerRight = useMemo(() => {
@@ -582,14 +802,14 @@
             <div className="footer__actions">
               <Button
                 variant="secondary"
-                disabled={!state.engine.has_stage2 || !state.renderedYaml.trim()}
+                disabled={!state.engine.has_compose || !state.renderedYaml.trim()}
                 onClick={downloadYaml}
               >
                 Download
               </Button>
               <Button
                 variant="primary"
-                disabled={!state.engine.has_stage2 || !state.renderedYaml.trim()}
+                disabled={!state.engine.has_compose || !state.renderedYaml.trim()}
                 onClick={copyYaml}
               >
                 Copy YAML
@@ -606,7 +826,7 @@
             Continue
           </Button>
         );
-      }, [state.wizard.stepIndex, state.engine.has_stage2, state.renderedYaml, canContinue]);
+      }, [state.wizard.stepIndex, state.engine.has_compose, state.renderedYaml, canContinue]);
 
       const mainContent = useMemo(() => {
         switch (state.wizard.stepIndex) {
@@ -674,7 +894,8 @@
                 engine={state.engine}
                 renderedYaml={state.renderedYaml}
                 onRefresh={refreshExportYaml}
-                busy={{ exporting: state.busy.exporting }}
+                onQuickUpdate={quickUpdateField}
+                busy={{ exporting: state.busy.exporting, patchingField: state.busy.patchingField }}
               />
             );
           default:
@@ -750,6 +971,69 @@
               <div className="footer__right">{footerRight}</div>
             </div>
           </footer>
+
+          {showPostLoadChooser && (
+            <div
+              className="modalBackdrop"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Choose workflow"
+            >
+              <div className="modalPanel" onClick={(event) => event.stopPropagation()}>
+                <Card>
+                  <CardHeader
+                    title="Choose workflow"
+                    subtitle="Pick the best flow for this file. You can always switch later via the stepper."
+                  />
+                  <CardBody>
+                    <div className="stack stack--md">
+                      {postLoadHasStage2 ? (
+                        <div className="banner banner--success">
+                          <div className="banner__title">x-casaos detected</div>
+                          <div className="banner__message">This looks like an already-edited CasaOS YAML.</div>
+                        </div>
+                      ) : (
+                        <div className="banner banner--warning">
+                          <div className="banner__title">No x-casaos detected</div>
+                          <div className="banner__message">This looks like a raw docker-compose.yml.</div>
+                        </div>
+                      )}
+
+                      <div className="grid2">
+                        <div className="banner">
+                          <div className="banner__title">Full workflow</div>
+                          <div className="banner__message">
+                            Use Metadata (Params/LLM), Preview/Render, then Export.
+                          </div>
+                        </div>
+                        <div className="banner">
+                          <div className="banner__title">Quick update</div>
+                          <div className="banner__message">
+                            Patch a single field (multi-language sync) and export immediately.
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="row row--end row--wrap">
+                        <Button
+                          variant={postLoadHasStage2 ? "secondary" : "primary"}
+                          onClick={chooseFullWorkflow}
+                        >
+                          Full workflow
+                        </Button>
+                        <Button
+                          variant={postLoadHasStage2 ? "primary" : "secondary"}
+                          onClick={chooseQuickUpdate}
+                        >
+                          Quick update
+                        </Button>
+                      </div>
+                    </div>
+                  </CardBody>
+                </Card>
+              </div>
+            </div>
+          )}
 
           <ToastHost toasts={state.toasts} onDismiss={dismissToast} />
         </div>

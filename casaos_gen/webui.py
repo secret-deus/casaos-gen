@@ -5,7 +5,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import uvicorn
 import yaml
@@ -121,6 +121,139 @@ def _require_llm_client():
         raise HTTPException(status_code=400, detail=f"Failed to initialize LLM client: {exc}") from exc
 
 
+def _parse_llm_json_response(content: str) -> Dict[str, Any]:
+    cleaned = (content or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+
+    if not cleaned.startswith("{"):
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            cleaned = cleaned[start : end + 1]
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        logger.error("Failed to parse LLM JSON: %s", exc)
+        raise HTTPException(status_code=400, detail="LLM returned invalid JSON.") from exc
+
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="LLM returned JSON that is not an object.")
+
+    return data
+
+
+def _build_translation_prompt(text: str, languages: List[str], source_language: Optional[str]) -> str:
+    language_list = json.dumps(languages, ensure_ascii=False)
+    source_hint = (
+        f"The source text locale is '{source_language}'. The value for that locale MUST match SOURCE_TEXT exactly."
+        if source_language
+        else "Detect the source language automatically. If SOURCE_TEXT is already written in one of the target locales, keep that locale EXACTLY equal to SOURCE_TEXT (no rewriting)."
+    )
+
+    return f"""
+You are a professional translator for software app store listings.
+
+Translate the SOURCE_TEXT into these target locales:
+{language_list}
+
+{source_hint}
+
+Rules:
+- Return ONLY valid JSON (no Markdown fences, no commentary).
+- The JSON MUST be an object where keys are exactly the locale codes above (no extra keys).
+- Values MUST be plain strings.
+- Preserve Markdown formatting, links, bullet lists, and line breaks.
+- Keep product names, environment variable names, port numbers, and file paths unchanged.
+- Do NOT add, remove, or reorder content.
+
+SOURCE_TEXT:
+{text}
+""".strip()
+
+
+def _translate_multilang_with_llm(text: str, source_language: Optional[str]) -> Dict[str, str]:
+    client = _require_llm_client()
+    prompt = _build_translation_prompt(text, STATE.languages, source_language)
+    temperature = max(0.0, min(float(STATE.llm_temperature), 0.3))
+    try:
+        response = client.chat.completions.create(
+            model=STATE.llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+        )
+    except Exception as exc:  # pragma: no cover - network/model errors
+        raise HTTPException(status_code=400, detail=f"LLM translation failed: {exc}") from exc
+
+    content = response.choices[0].message.content or ""
+    data = _parse_llm_json_response(content)
+
+    translations: Dict[str, str] = {}
+    for lang in STATE.languages:
+        value = data.get(lang)
+        translations[lang] = "" if value is None else str(value)
+
+    if source_language and source_language in translations:
+        translations[source_language] = text
+
+    english_text = translations.get("en_US") or ""
+    for lang in STATE.languages:
+        if translations[lang].strip():
+            continue
+        if lang == "en_US":
+            translations[lang] = english_text.strip() or text
+        else:
+            translations[lang] = english_text.strip() or text
+
+    return translations
+
+
+def _update_translation_map_from_multilang(translations: Dict[str, str]) -> None:
+    english_text = str(translations.get("en_US") or "").strip()
+    if not english_text:
+        return
+    entry = STATE.translation_map.setdefault(english_text, {})
+    for lang in STATE.languages:
+        if lang == "en_US":
+            continue
+        candidate = str(translations.get(lang) or "").strip()
+        if candidate:
+            entry[lang] = candidate
+
+
+def _sync_meta_from_multilang_target(target: str, translations: Dict[str, str]) -> None:
+    meta = STATE.meta
+    if meta is None:
+        return
+
+    english_text = str(translations.get("en_US") or "").strip()
+    if not english_text:
+        return
+
+    if target in {"app.title", "app.tagline", "app.description"}:
+        attr_name = target.split(".", 1)[1]
+        setattr(meta.app, attr_name, english_text)
+        return
+
+    parts = target.split(":")
+    if len(parts) >= 4 and parts[0] == "service" and parts[2] in {"env", "port", "volume"}:
+        service_name, field_type, identifier = _parse_service_target(target)
+        svc = meta.services.get(service_name)
+        if not svc:
+            return
+        items = {"env": svc.envs, "port": svc.ports, "volume": svc.volumes}.get(field_type)
+        if items is None:
+            return
+        target_item = next((item for item in items if item.container == identifier), None)
+        if target_item is None:
+            return
+        target_item.description = english_text
+
+
 def _resolve_app_stage2_value(field_path: str):
     compose = STATE.compose_data or {}
     scope = compose.get("x-casaos") or {}
@@ -222,6 +355,84 @@ def _build_assistant_prompt(context: str) -> str:
     return f"{base}\n\nContext:\n{context}"
 
 
+def _as_text(value: Any) -> str:
+    if isinstance(value, dict):
+        en_value = None
+        if "en_US" in value:
+            en_value = value.get("en_US")
+            if en_value is not None:
+                en_text = str(en_value)
+                if en_text.strip():
+                    return en_text
+        for candidate in value.values():
+            if candidate is None:
+                continue
+            if en_value is not None and candidate is en_value:
+                continue
+            text = str(candidate)
+            if text.strip():
+                return text
+        return ""
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _seed_meta_from_existing_compose(meta: CasaOSMeta, compose_data: Dict[str, Any]) -> None:
+    """Prefer existing x-casaos values when loading an already-edited CasaOS YAML.
+
+    The Web UI normally builds a fresh Stage 1 metadata skeleton from docker-compose services.
+    When users upload a compose that already contains x-casaos blocks, we should hydrate the
+    Stage 1 meta from those values so "quick update" and form defaults reflect the file.
+    """
+
+    app_block = compose_data.get("x-casaos")
+    if not isinstance(app_block, dict):
+        return
+
+    for field in ("title", "tagline", "description"):
+        text = _as_text(app_block.get(field)).strip()
+        if text:
+            setattr(meta.app, field, text)
+
+    for field in ("category", "author", "developer", "main", "port_map", "scheme", "index"):
+        value = app_block.get(field)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            setattr(meta.app, field, text)
+
+    services = compose_data.get("services") or {}
+    if not isinstance(services, dict):
+        return
+
+    for service_name, service in services.items():
+        if not isinstance(service, dict):
+            continue
+        service_meta = meta.services.get(service_name)
+        if not service_meta:
+            continue
+        svc_block = service.get("x-casaos") or {}
+        if not isinstance(svc_block, dict):
+            continue
+        for list_key, attr_name in (("envs", "envs"), ("ports", "ports"), ("volumes", "volumes")):
+            items = svc_block.get(list_key) or []
+            if not isinstance(items, list):
+                continue
+            meta_items = getattr(service_meta, attr_name, [])
+            for entry in items:
+                if not isinstance(entry, dict):
+                    continue
+                container = str(entry.get("container") or "").strip()
+                description = _as_text(entry.get("description")).strip()
+                if not container or not description:
+                    continue
+                target_item = next((item for item in meta_items if item.container == container), None)
+                if target_item:
+                    target_item.description = description
+
+
 def _load_index_html() -> str:
     if INDEX_HTML.exists():
         return INDEX_HTML.read_text(encoding="utf-8")
@@ -248,6 +459,7 @@ class FieldUpdate(BaseModel):
     target: str
     value: str
     propagate_all_languages: bool = False
+    sync_stage2: bool = True
 
 
 class ComposeText(BaseModel):
@@ -257,6 +469,8 @@ class ComposeText(BaseModel):
 class Stage2MultiUpdate(BaseModel):
     target: str
     value: str
+    language: Optional[str] = None
+    overwrite_all_languages: bool = True
 
 
 class Stage2SingleUpdate(BaseModel):
@@ -307,6 +521,36 @@ def _update_meta_field(meta: CasaOSMeta, payload: FieldUpdate) -> None:
 def _update_stage2_multi_field(payload: Stage2MultiUpdate) -> None:
     _ensure_stage2_structure(require_meta=True)
     compose = STATE.compose_data or {}
+    overwrite_all = bool(payload.overwrite_all_languages)
+    language = (payload.language or "").strip()
+    if not overwrite_all:
+        if not language:
+            raise HTTPException(
+                status_code=400,
+                detail="language is required when overwrite_all_languages is false.",
+            )
+        if language not in STATE.languages:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown language '{language}'. Available: {', '.join(STATE.languages)}",
+            )
+
+    source_language = language or None
+    if source_language and source_language.lower() in {"auto", "detect"}:
+        source_language = None
+    if source_language and source_language not in STATE.languages:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown language '{source_language}'. Available: {', '.join(STATE.languages)}",
+        )
+
+    translations: Optional[Dict[str, str]] = None
+    if overwrite_all:
+        translations = _translate_multilang_with_llm(payload.value, source_language)
+        # Keep Stage 1 / translation map consistent so a future re-render won't erase translations.
+        _sync_meta_from_multilang_target(payload.target, translations)
+        if payload.target in {"app.title", "app.tagline", "app.description"} or payload.target.startswith("service:"):
+            _update_translation_map_from_multilang(translations)
 
     if payload.target.startswith("app."):
         field_path = payload.target.split(".", 1)[1]
@@ -319,8 +563,11 @@ def _update_stage2_multi_field(payload: Stage2MultiUpdate) -> None:
         if not isinstance(multilang, dict):
             multilang = {}
             scope[parts[-1]] = multilang
-        for lang in STATE.languages:
-            multilang[lang] = payload.value
+        if overwrite_all:
+            for lang in STATE.languages:
+                multilang[lang] = translations.get(lang, payload.value) if translations else payload.value
+        else:
+            multilang[language] = payload.value
         return
 
     service_name, field_type, identifier = _parse_service_target(payload.target)
@@ -348,9 +595,11 @@ def _update_stage2_multi_field(payload: Stage2MultiUpdate) -> None:
     if not isinstance(desc, dict):
         desc = {}
         target_item["description"] = desc
-    for lang in STATE.languages:
-        desc[lang] = payload.value
-    _propagate_translation(payload.value)
+    if overwrite_all:
+        for lang in STATE.languages:
+            desc[lang] = translations.get(lang, payload.value) if translations else payload.value
+    else:
+        desc[language] = payload.value
 
 
 def _update_stage2_single_field(payload: Stage2SingleUpdate) -> None:
@@ -436,6 +685,7 @@ async def load_compose(file: UploadFile = File(...)) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to parse compose file: {exc}") from exc
     meta = build_meta(compose_data)
+    _seed_meta_from_existing_compose(meta, compose_data)
     STATE.compose_data = compose_data
     STATE.compose_text = text
     STATE.meta = meta
@@ -452,6 +702,7 @@ async def load_compose_text(payload: ComposeText) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to parse compose text: {exc}") from exc
     meta = build_meta(compose_data)
+    _seed_meta_from_existing_compose(meta, compose_data)
     STATE.compose_data = compose_data
     STATE.compose_text = raw_text
     STATE.meta = meta
@@ -661,7 +912,7 @@ async def update_meta_field(payload: FieldUpdate) -> dict:
     _update_meta_field(meta, payload)
     if payload.propagate_all_languages:
         _propagate_translation(payload.value)
-    if STATE.compose_data and isinstance(STATE.compose_data.get("x-casaos"), dict):
+    if payload.sync_stage2 and STATE.compose_data and isinstance(STATE.compose_data.get("x-casaos"), dict):
         # Keep Stage 2 compose in sync for key app fields when editing Stage 1 meta.
         app_x = STATE.compose_data["x-casaos"]
         if payload.target in ("app.title", "app.tagline", "app.description"):

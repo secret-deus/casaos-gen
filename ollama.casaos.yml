@@ -1,0 +1,124 @@
+name: ollama
+services:
+  ollama:
+    image: ollama/ollama:0.9.5
+    container_name: ollama
+    deploy:
+      resources:
+        reservations:
+          memory: 2G
+    restart: unless-stopped
+    network_mode: bridge
+    ports:
+      - target: 11434
+        published: "25661"
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: /DATA/AppData/$AppID
+        target: /root/.ollama
+    environment:
+      TZ: $TZ
+      OLLAMA_HOST: 0.0.0.0:11434
+    x-casaos:
+      ports:
+        - container: "11434"
+          description:
+            en_US: Ollama API Port
+            zh_CN: Ollama API 端口
+      volumes:
+        - container: /root/.ollama
+          description:
+            en_US: Ollama models and data directory
+            zh_CN: Ollama 模型与数据目录
+      envs:
+        - container: TZ
+          description:
+            en_US: Time Zone
+            zh_CN: 时区
+        - container: OLLAMA_HOST
+          description:
+            en_US: Server listen address
+            zh_CN: 服务监听地址
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: ollama
+  category: Chat
+  developer: ollama
+  author: ollama
+  tagline:
+    en_US: Get up and running with large language models locally
+    zh_CN: 在本地快速运行大语言模型
+  description:
+    en_US: |
+      Ollama is a lightweight tool for running and serving large language models locally. It provides a simple CLI and an HTTP API so you can deploy models on your own hardware and integrate them into your workflows and apps.
+
+      Its core workflow is straightforward: pull a model (such as Llama, Mistral, Gemma, or other popular open models) and run it instantly. All inference happens on your device, keeping data private and allowing you to work offline after model downloads complete.
+
+      Ollama also supports model customization via Modelfiles and exposes a REST API for programmatic usage. This makes it suitable for developers building local assistants, RAG pipelines, or tool-enabled automations, while keeping full control over models and resources.
+
+      **Key Features:**
+      - Run LLMs directly on your hardware with local model storage
+      - Simple CLI and HTTP API for easy integration
+      - Manage multiple models and versions with a consistent workflow
+
+      **Learn More:**
+      - [Ollama Website](https://ollama.com/)
+      - [Ollama on GitHub](https://github.com/ollama/ollama)
+    zh_CN: |
+      Ollama 是一款用于在本地运行与托管大型语言模型的工具，提供简洁的命令行界面和 HTTP API，方便用户在自己的硬件上快速部署模型，并将其集成到各类应用与工作流中。
+
+      它的核心流程非常直观：拉取模型（如 Llama、Mistral、Gemma 等开源模型）并立即运行。推理过程在本地完成，数据无需上传，确保隐私；在模型下载完成后也可离线使用。
+
+      Ollama 同时支持通过 Modelfile 自定义模型配置，并提供 REST API 便于程序化调用。适合开发者构建本地助手、RAG 检索增强应用或工具调用自动化场景，在保证可控性的同时实现现代化的本地 AI 体验。
+
+      **主要功能：**
+      - 直接在本地硬件上运行大语言模型，模型与数据本地持久化
+      - 提供 CLI 与 HTTP API，便于快速集成与调用
+      - 支持多模型管理与版本切换，统一的使用体验
+
+      **了解更多：**
+      - [Ollama 官方网站](https://ollama.com/)
+      - [Ollama GitHub 仓库](https://github.com/ollama/ollama)
+  icon: https://cdn.jsdelivr.net/gh/IceWhaleTech/CasaOS-AppStore@main/Apps/Ollama/icon.png
+  screenshot_link:
+    - https://cdn.jsdelivr.net/gh/IceWhaleTech/CasaOS-AppStore@main/Apps/Ollama/screenshot-1.png
+    - https://cdn.jsdelivr.net/gh/IceWhaleTech/CasaOS-AppStore@main/Apps/Ollama/screenshot-2.png
+    - https://cdn.jsdelivr.net/gh/IceWhaleTech/CasaOS-AppStore@main/Apps/Ollama/screenshot-3.png
+  thumbnail: https://cdn.jsdelivr.net/gh/IceWhaleTech/CasaOS-AppStore@main/Apps/Ollama/thumbnail.png
+  tips:
+    before_install:
+      en_US: |
+        Ollama stores downloaded models under `/DATA/AppData/$AppID`. Ensure you have sufficient disk space before pulling large models.
+
+        **API Endpoint**
+
+        - `http://<CasaOS-IP>:25661` (host port is configurable via `port_map`)
+
+        **Quick Start**
+
+        - Pull a model: `ollama pull llama3.1`
+        - Run it: `ollama run llama3.1`
+
+        If you want a browser-based UI, install a separate web UI (e.g. Open WebUI) and point it to the Ollama API endpoint.
+      zh_CN: |
+        Ollama 会将下载的模型与数据保存到 `/DATA/AppData/$AppID`。拉取大模型前请确保磁盘空间充足。
+
+        **API 访问地址**
+
+        - `http://<CasaOS-IP>:25661`（宿主机端口可通过 `port_map` 调整）
+
+        **快速开始**
+
+        - 拉取模型：`ollama pull llama3.1`
+        - 运行模型：`ollama run llama3.1`
+
+        如需浏览器界面，请额外安装 Web UI（如 Open WebUI），并将其指向上述 Ollama API 地址。
+  scheme: http
+  port_map: "25661"
+  index: /
+  title:
+    en_US: Ollama
+    zh_CN: Ollama
