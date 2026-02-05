@@ -15,7 +15,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .compose_normalize import normalize_compose_for_appstore
-from .i18n import DEFAULT_LANGUAGES, load_translation_map, wrap_multilang
+from .i18n import DEFAULT_LANGUAGES, TRANSLATION_MAP, wrap_multilang
+from .llm_translate import LLMTranslationError
 from .models import CasaOSMeta
 from .pipeline import (
     apply_params_to_meta,
@@ -46,7 +47,9 @@ class WebState:
     compose_text: str = ""
     meta: Optional[CasaOSMeta] = None
     languages: List[str] = field(default_factory=lambda: list(DEFAULT_LANGUAGES))
-    translation_map: Dict[str, Dict[str, str]] = field(default_factory=load_translation_map)
+    translation_map: Dict[str, Dict[str, str]] = field(
+        default_factory=lambda: {key: dict(value) for key, value in TRANSLATION_MAP.items()}
+    )
     llm_base_url: Optional[str] = None
     llm_api_key: Optional[str] = None
     llm_model: str = "gpt-4.1-mini"
@@ -98,12 +101,30 @@ def _ensure_stage2_structure(require_meta: bool = False) -> None:
         if require_meta:
             raise HTTPException(status_code=400, detail="Stage 1 metadata unavailable. Run Stage 1 first.")
         return
-    STATE.compose_data = render_compose(
-        STATE.compose_data,
-        STATE.meta,
-        languages=STATE.languages,
-        translation_map_override=STATE.translation_map,
-    )
+    try:
+        STATE.compose_data = render_compose(
+            STATE.compose_data,
+            STATE.meta,
+            languages=STATE.languages,
+            translation_map_override=STATE.translation_map,
+            auto_translate=True,
+            llm_model=STATE.llm_model,
+            llm_temperature=STATE.llm_temperature,
+            llm_api_key=STATE.llm_api_key,
+            llm_base_url=STATE.llm_base_url,
+        )
+    except LLMTranslationError as exc:
+        logger.warning(
+            "Stage 2 auto-translate failed; falling back to translation table/copy behavior: %s",
+            exc,
+        )
+        STATE.compose_data = render_compose(
+            STATE.compose_data,
+            STATE.meta,
+            languages=STATE.languages,
+            translation_map_override=STATE.translation_map,
+            auto_translate=False,
+        )
 
 
 def _require_llm_client():
@@ -518,11 +539,12 @@ def _update_meta_field(meta: CasaOSMeta, payload: FieldUpdate) -> None:
     target_item.description = payload.value
 
 
-def _update_stage2_multi_field(payload: Stage2MultiUpdate) -> None:
+def _update_stage2_multi_field(payload: Stage2MultiUpdate) -> List[str]:
     _ensure_stage2_structure(require_meta=True)
     compose = STATE.compose_data or {}
     overwrite_all = bool(payload.overwrite_all_languages)
     language = (payload.language or "").strip()
+    warnings: List[str] = []
     if not overwrite_all:
         if not language:
             raise HTTPException(
@@ -546,7 +568,15 @@ def _update_stage2_multi_field(payload: Stage2MultiUpdate) -> None:
 
     translations: Optional[Dict[str, str]] = None
     if overwrite_all:
-        translations = _translate_multilang_with_llm(payload.value, source_language)
+        try:
+            translations = _translate_multilang_with_llm(payload.value, source_language)
+        except HTTPException as exc:  # pragma: no cover - depends on network/LLM availability
+            logger.warning(
+                "LLM translation failed during multi-language update; falling back to copy behavior: %s",
+                exc.detail,
+            )
+            translations = {lang: payload.value for lang in STATE.languages}
+            warnings.append("LLM unavailable; copied input to all locales (no translation performed).")
         # Keep Stage 1 / translation map consistent so a future re-render won't erase translations.
         _sync_meta_from_multilang_target(payload.target, translations)
         if payload.target in {"app.title", "app.tagline", "app.description"} or payload.target.startswith("service:"):
@@ -568,7 +598,7 @@ def _update_stage2_multi_field(payload: Stage2MultiUpdate) -> None:
                 multilang[lang] = translations.get(lang, payload.value) if translations else payload.value
         else:
             multilang[language] = payload.value
-        return
+        return warnings
 
     service_name, field_type, identifier = _parse_service_target(payload.target)
     services = compose.get("services") or {}
@@ -600,6 +630,7 @@ def _update_stage2_multi_field(payload: Stage2MultiUpdate) -> None:
             desc[lang] = translations.get(lang, payload.value) if translations else payload.value
     else:
         desc[language] = payload.value
+    return warnings
 
 
 def _update_stage2_single_field(payload: Stage2SingleUpdate) -> None:
@@ -724,6 +755,7 @@ async def fill_metadata(
 ) -> dict:
     if STATE.compose_data is None:
         raise HTTPException(status_code=400, detail="No compose file loaded.")
+    warnings: List[str] = []
 
     mode_value = (mode or "").strip().lower()
     use_llm_value = None if use_llm is None else bool(use_llm)
@@ -777,14 +809,20 @@ async def fill_metadata(
     if use_llm_value:
         model_name = model or STATE.llm_model
         temp_value = STATE.llm_temperature if temperature is None else temperature
-        meta = fill_meta_with_llm(
-            meta,
-            model=model_name,
-            temperature=temp_value,
-            api_key=llm_api_key or STATE.llm_api_key,
-            base_url=llm_base_url or STATE.llm_base_url,
-            prompt_instructions=llm_prompt,
-        )
+        try:
+            meta = fill_meta_with_llm(
+                meta,
+                model=model_name,
+                temperature=temp_value,
+                api_key=llm_api_key or STATE.llm_api_key,
+                base_url=llm_base_url or STATE.llm_base_url,
+                prompt_instructions=llm_prompt,
+            )
+        except Exception as exc:  # pragma: no cover - depends on network/LLM availability
+            logger.warning("Stage 1 LLM fill failed; continuing without LLM: %s", exc)
+            warnings.append(
+                "LLM unavailable; skipped LLM metadata fill. Configure Base URL/API key, or disable 'Use LLM'."
+            )
         if use_params_value:
             meta = apply_params_to_meta(meta, params)
 
@@ -793,7 +831,12 @@ async def fill_metadata(
     mode_label = " + ".join(
         part for part in ("LLM" if use_llm_value else "", "Params" if use_params_value else "") if part
     )
-    return {"status": "ok", "message": f"Metadata updated ({mode_label}).", "meta": meta.model_dump()}
+    return {
+        "status": "ok",
+        "message": f"Metadata updated ({mode_label}).",
+        "meta": meta.model_dump(),
+        "warnings": warnings,
+    }
 
 
 @app.post("/api/render")
@@ -802,13 +845,35 @@ async def render_stage2() -> dict:
         raise HTTPException(status_code=400, detail="No compose file loaded.")
     if STATE.meta is None:
         raise HTTPException(status_code=400, detail="Stage 1 metadata unavailable.")
-    STATE.compose_data = render_compose(
-        STATE.compose_data,
-        STATE.meta,
-        languages=STATE.languages,
-        translation_map_override=STATE.translation_map,
-    )
-    return {"status": "ok", "compose": STATE.compose_data}
+    warnings: List[str] = []
+    try:
+        STATE.compose_data = render_compose(
+            STATE.compose_data,
+            STATE.meta,
+            languages=STATE.languages,
+            translation_map_override=STATE.translation_map,
+            auto_translate=True,
+            llm_model=STATE.llm_model,
+            llm_temperature=STATE.llm_temperature,
+            llm_api_key=STATE.llm_api_key,
+            llm_base_url=STATE.llm_base_url,
+        )
+    except LLMTranslationError as exc:
+        logger.warning(
+            "Stage 2 render failed with LLM auto-translate; falling back to translation table/copy behavior: %s",
+            exc,
+        )
+        warnings.append(
+            "LLM unavailable; rendered Stage 2 without auto-translation (other locales will copy en_US unless present in the translation table)."
+        )
+        STATE.compose_data = render_compose(
+            STATE.compose_data,
+            STATE.meta,
+            languages=STATE.languages,
+            translation_map_override=STATE.translation_map,
+            auto_translate=False,
+        )
+    return {"status": "ok", "compose": STATE.compose_data, "warnings": warnings}
 
 
 @app.post("/api/upload")
@@ -845,6 +910,11 @@ async def upload_compose(
             meta,
             languages=STATE.languages,
             translation_map_override=STATE.translation_map,
+            auto_translate=True,
+            llm_model=model,
+            llm_temperature=temperature,
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
         )
     except Exception as exc:  # pragma: no cover - defensive logging
         logger.warning("Stage 2 build failed; falling back to minimal template: %s", exc)
@@ -923,8 +993,8 @@ async def update_meta_field(payload: FieldUpdate) -> dict:
 
 @app.post("/api/stage2/update-multi")
 async def update_stage2_multi_field(payload: Stage2MultiUpdate) -> dict:
-    _update_stage2_multi_field(payload)
-    return {"status": "ok", "compose": STATE.compose_data}
+    warnings = _update_stage2_multi_field(payload)
+    return {"status": "ok", "compose": STATE.compose_data, "warnings": warnings}
 
 
 @app.post("/api/stage2/update-single")

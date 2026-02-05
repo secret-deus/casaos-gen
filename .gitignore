@@ -46,3 +46,7 @@ llm_config.json
 # Local backups
 *.backup
 *.bak
+
+# Obsolete documentation
+AGENTS.md
+IMPLEMENTATION.md

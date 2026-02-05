@@ -1,6 +1,8 @@
-﻿import unittest
+import unittest
 import tempfile
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from casaos_gen import models
 from casaos_gen.compose_normalize import normalize_compose_for_appstore
@@ -8,6 +10,7 @@ from casaos_gen.constants import CDN_BASE
 from casaos_gen.i18n import load_translation_map, wrap_multilang
 from casaos_gen.llm_stage1 import build_stage1_prompt
 from casaos_gen.pipeline import apply_params_to_meta
+from casaos_gen.pipeline import render_compose
 from casaos_gen.parser import build_casaos_meta
 from casaos_gen.template_stage import build_params_skeleton, build_template_compose
 from casaos_gen.yaml_out import build_final_compose, dump_yaml, write_compose_file
@@ -172,6 +175,77 @@ class CasaOSLLMPromptTests(unittest.TestCase):
         )
         prompt = build_stage1_prompt(meta, custom_prompt="CUSTOM_RULE: hello")
         self.assertIn("CUSTOM_RULE: hello", prompt)
+
+
+class CasaOSStage2LLMTranslationTests(unittest.TestCase):
+    def test_render_compose_auto_translate_fills_locales_via_llm(self):
+        class FakeLLMClient:
+            def __init__(self) -> None:
+                self.chat = SimpleNamespace(completions=self)
+
+            def create(self, model, messages, temperature):
+                prompt = messages[0]["content"]
+                marker = "ITEMS (ITEM_ID -> SOURCE_TEXT):"
+                index = prompt.find(marker)
+                if index == -1:
+                    raise AssertionError("LLM prompt missing ITEMS marker")
+                items_json = prompt[index + len(marker) :].strip()
+                items = json.loads(items_json)
+
+                response_obj = {}
+                for item_id, source_text in items.items():
+                    response_obj[item_id] = {
+                        "en_US": source_text,
+                        "zh_CN": f"中文:{source_text}",
+                    }
+
+                content = json.dumps(response_obj, ensure_ascii=False)
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+        compose = {
+            "services": {"web": {"image": "nginx"}},
+            "x-casaos": {"tips": {"before_install": "Run setup"}},
+        }
+        meta = models.CasaOSMeta(
+            app=models.AppMeta(
+                title="Sample",
+                tagline="Deep document RAG",
+                description="Line1\n\nLine2",
+                category="Web Server",
+                author="me",
+                main="web",
+                port_map="8080",
+            ),
+            services={
+                "web": models.ServiceMeta(
+                    ports=[models.PortItem(container="80", description="Main web interface port")],
+                    envs=[models.EnvItem(container="TZ", description="Time Zone")],
+                    volumes=[models.VolumeItem(container="/data", description="Data directory")],
+                )
+            },
+        )
+
+        # Simulate an earlier run where locales were populated by copying en_US.
+        translation_cache = {"Deep document RAG": {"zh_CN": "Deep document RAG"}}
+
+        out = render_compose(
+            compose,
+            meta,
+            languages=["en_US", "zh_CN"],
+            translation_map_override=translation_cache,
+            auto_translate=True,
+            llm_model="fake-model",
+            llm_temperature=0.2,
+            llm_client=FakeLLMClient(),
+        )
+
+        self.assertEqual(out["x-casaos"]["tagline"]["zh_CN"], "中文:Deep document RAG")
+        self.assertEqual(out["x-casaos"]["tips"]["before_install"]["zh_CN"], "中文:Run setup")
+        self.assertEqual(
+            out["services"]["web"]["x-casaos"]["ports"][0]["description"]["zh_CN"],
+            "中文:Main web interface port",
+        )
+        self.assertEqual(translation_cache["Deep document RAG"]["zh_CN"], "中文:Deep document RAG")
 
 
 class CasaOSTemplateStageTests(unittest.TestCase):

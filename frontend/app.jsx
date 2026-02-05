@@ -489,7 +489,7 @@
       const renderStage2 = async ({ focusTab = true } = {}) => {
         dispatch({ type: "SET_BUSY", key: "rendering", value: true });
         try {
-          await requestJSON("/api/render", { method: "POST" });
+          const renderResult = await requestJSON("/api/render", { method: "POST" });
           const yamlText = await requestText("/api/export", { method: "POST" });
           dispatch({ type: "SET_RENDERED_YAML", value: yamlText });
           if (focusTab) {
@@ -497,7 +497,12 @@
           }
           await syncUIState({ silent: true });
           dispatch({ type: "UNLOCK_STEP", index: 3 });
-          pushToast({ title: "Rendered", message: "x-casaos output is ready.", variant: "success" });
+          const warnings = Array.isArray(renderResult?.warnings) ? renderResult.warnings : [];
+          if (warnings.length) {
+            pushToast({ title: "Rendered (degraded)", message: warnings[0], variant: "warning", duration: 5200 });
+          } else {
+            pushToast({ title: "Rendered", message: "x-casaos output is ready.", variant: "success" });
+          }
         } catch (error) {
           pushToast({ title: "Render failed", message: error.message, variant: "danger" });
         } finally {
@@ -539,10 +544,15 @@
             }
           }
 
-          await requestJSON("/api/meta/fill", { method: "POST", body: formData });
+          const result = await requestJSON("/api/meta/fill", { method: "POST", body: formData });
           await syncUIState({ silent: true });
           dispatch({ type: "SET_RENDERED_YAML", value: "" });
-          pushToast({ title: "Metadata saved", message: "Metadata updated successfully.", variant: "success" });
+          const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+          if (warnings.length) {
+            pushToast({ title: "Metadata saved (LLM skipped)", message: warnings[0], variant: "warning", duration: 6500 });
+          } else {
+            pushToast({ title: "Metadata saved", message: "Metadata updated successfully.", variant: "success" });
+          }
 
           if (state.params.autoRenderAfterSave) {
             await renderStage2({ focusTab: false });
@@ -694,8 +704,9 @@
             });
           }
 
+          let stage2Warnings = [];
           if (isMultilang) {
-            await requestJSON("/api/stage2/update-multi", {
+            const updateResult = await requestJSON("/api/stage2/update-multi", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -705,6 +716,7 @@
                 language: languageValue || undefined,
               }),
             });
+            stage2Warnings = Array.isArray(updateResult?.warnings) ? updateResult.warnings : [];
           } else {
             await requestJSON("/api/stage2/update-single", {
               method: "POST",
@@ -718,8 +730,12 @@
           await syncUIState({ silent: true });
           pushToast({
             title: "Updated",
-            message: isMultilang ? `Updated ${targetValue} (LLM translated).` : `Updated ${targetValue}.`,
-            variant: "success",
+            message: isMultilang
+              ? stage2Warnings.length
+                ? `Updated ${targetValue} (copied to all locales; LLM unavailable).`
+                : `Updated ${targetValue} (LLM translated).`
+              : `Updated ${targetValue}.`,
+            variant: stage2Warnings.length ? "warning" : "success",
             duration: 2500,
           });
           return true;

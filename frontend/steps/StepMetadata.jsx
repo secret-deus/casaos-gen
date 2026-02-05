@@ -132,7 +132,11 @@
                       />
                     </Field>
                   </div>
-                  <Field id="description" label="Description" hint="Plain text. It will be replicated to all locales unless you customize translations.">
+                  <Field
+                    id="description"
+                    label="Description"
+                    hint="Plain text. It will be translated to all locales via LLM when you Render Stage 2."
+                  >
                     <Textarea
                       id="description"
                       value={metadataDraft.description}
