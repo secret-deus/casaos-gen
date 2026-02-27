@@ -236,35 +236,47 @@ def translate_texts_with_llm(
             long_texts.append(text)
 
     out: Dict[str, Dict[str, str]] = {}
+    errors: List[str] = []
 
     for chunk in _chunk_texts(short_texts, max_items=batch_max_items, max_chars=batch_max_chars):
         items = {str(idx): value for idx, value in enumerate(chunk)}
-        chunk_result = translate_items_with_llm(
-            items,
-            languages,
-            model=model,
-            temperature=temperature,
-            client=client,
-            api_key=api_key,
-            base_url=base_url,
-            source_language=source_language,
-        )
-        for item_id, source_text in items.items():
-            out[source_text] = chunk_result.get(item_id) or {str(lang): source_text for lang in languages}
+        try:
+            chunk_result = translate_items_with_llm(
+                items,
+                languages,
+                model=model,
+                temperature=temperature,
+                client=client,
+                api_key=api_key,
+                base_url=base_url,
+                source_language=source_language,
+            )
+            for item_id, source_text in items.items():
+                out[source_text] = chunk_result.get(item_id) or {str(lang): source_text for lang in languages}
+        except LLMTranslationError as exc:
+            logger.warning("Short-text batch translation failed, skipping batch: %s", exc)
+            errors.append(str(exc))
 
     for text in long_texts:
         items = {"0": text}
-        chunk_result = translate_items_with_llm(
-            items,
-            languages,
-            model=model,
-            temperature=temperature,
-            client=client,
-            api_key=api_key,
-            base_url=base_url,
-            source_language=source_language,
-        )
-        out[text] = chunk_result.get("0") or {str(lang): text for lang in languages}
+        try:
+            chunk_result = translate_items_with_llm(
+                items,
+                languages,
+                model=model,
+                temperature=temperature,
+                client=client,
+                api_key=api_key,
+                base_url=base_url,
+                source_language=source_language,
+            )
+            out[text] = chunk_result.get("0") or {str(lang): text for lang in languages}
+        except LLMTranslationError as exc:
+            logger.warning("Long-text translation failed for %.40s..., skipping: %s", text, exc)
+            errors.append(str(exc))
+
+    if not out and errors:
+        raise LLMTranslationError(f"All translation batches failed: {errors[0]}")
 
     return out
 

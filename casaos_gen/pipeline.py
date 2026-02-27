@@ -68,8 +68,8 @@ def _replace_store_folder_placeholder(value: str, store_folder: str) -> str:
 
 
 def _apply_text_field(meta: CasaOSMeta, field: str, value: Any) -> None:
-    text = _as_text(value)
-    if text.strip():
+    text = _as_text(value).strip()
+    if text:
         setattr(meta.app, field, text)
 
 

@@ -4,241 +4,156 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-CasaOS Compose Generator 是一个命令行工具，用于将标准 `docker-compose.yml` 文件转换为符合 CasaOS 规范的多语言配置文件。项目采用两阶段架构：Stage 1 使用 LLM 生成英文描述，Stage 2 将其扩展为多语言结构。
-
-## 核心架构原则
-
-1. **结构与内容分离**：本地代码负责结构推断（主服务、端口、分类等），LLM 仅负责文本内容生成
-2. **强类型校验**：使用 Pydantic 模型（`CasaOSMeta`）确保数据结构稳定可靠
-3. **模块化设计**：解析、LLM 调用、多语言扩展、YAML 输出各自独立
-4. **增量更新支持**：通过版本管理实现智能差异检测和描述保留
+CasaOS Compose Generator — 将标准 `docker-compose.yml` 转换为符合 CasaOS 规范的多语言配置文件。两阶段架构：Stage 1 通过 LLM 生成英文描述，Stage 2 将其扩展为多语言结构。
 
 详细架构设计参见 `smartconvert/develop.md`。
 
 ## 常用命令
 
-### 开发环境
-
 ```bash
-# 安装依赖（推荐使用 uv）
+# 安装依赖
 uv sync
 
-# 或使用 pip
-pip install -r requirements.txt
-
-# 运行测试
+# 运行全部测试
 python -m unittest discover -s tests
-```
 
-### CLI 工具使用
+# 运行单个测试文件
+python -m unittest tests.test_casaos_gen
 
-```bash
+# 运行单个测试方法
+python -m unittest tests.test_casaos_gen.CasaOSParserTests.test_build_casaos_meta_generates_structure
+
 # 完整流程：Compose -> LLM -> CasaOS YAML
 uv run casaos-gen ./docker-compose.yml --output casaos-compose.yml --stage all
 
-# 仅运行 Stage 1（LLM 生成描述）
-uv run casaos-gen ./docker-compose.yml --stage 1 --meta-output meta.json
+# 仅生成模板（不调用 LLM）
+uv run casaos-gen ./docker-compose.yml --stage template --params params.yml
 
-# 仅运行 Stage 2（多语言扩展）
-uv run casaos-gen ./docker-compose.yml --stage 2 --meta-input meta.json
+# 后处理已有 CasaOS compose（仅规范化，不调用 LLM）
+uv run casaos-gen ./casaos-compose.yml --stage normalize --params params.yml
 
-# 生成 params.yml 模板
-uv run casaos-gen ./docker-compose.yml --stage params --params-output params.yml
-
-# 使用 params 覆盖元数据
-uv run casaos-gen ./docker-compose.yml --params params.yml --stage all
-
-# AppStore 格式输出（规范化 ports/volumes）
-uv run casaos-gen ./docker-compose.yml --appstore --params params.yml
-
-# 增量更新模式（保留现有描述）
+# 增量更新（保留已有描述，仅对变更部分调用 LLM）
 uv run casaos-gen ./docker-compose.yml --incremental
 
-# 强制完全重新生成
-uv run casaos-gen ./docker-compose.yml --force-regenerate
-
-# 版本管理
-uv run casaos-gen --list-versions
-uv run casaos-gen --show-diff ./docker-compose.yml
-uv run casaos-gen --rollback meta.20260108_143022.json
-```
-
-### Web UI
-
-```bash
-# 启动 Web 界面
+# 启动 Web UI（http://localhost:8000）
 uv run casaos-gen-web
-
-# 或
-python -m casaos_gen.webui
 ```
 
-Web UI 默认运行在 `http://localhost:8000`，提供：
-- 上传 compose 文件
-- 配置 LLM 端点（Base URL、API Key、Model、Temperature）
-- 在线编辑元数据字段
-- 导出 CasaOS YAML
+## 核心架构
 
-## 核心模块说明
+### 设计原则
+
+1. **结构与内容分离**：本地代码负责结构推断（主服务、端口、分类等），LLM 仅负责文本内容生成
+2. **强类型校验**：`CasaOSMeta`（Pydantic）作为 Stage 1 和 Stage 2 之间的统一中间格式
+3. **翻译分层**：短文本查翻译表 `casaos_gen/translations.yml`，长文本默认仅保留英文，`--auto-translate` 可启用 LLM 翻译
 
 ### 数据流管道
 
 ```
 docker-compose.yml
-    ↓
-parser.py (解析 + 推断结构)
-    ↓
-models.py (CasaOSMeta 骨架)
-    ↓
-llm_stage1.py (LLM 填充英文描述)
-    ↓
-i18n.py (多语言扩展)
-    ↓
-yaml_out.py (生成最终 YAML)
+    ↓ parser.py (解析 + 推断主服务/端口/分类/author)
+    ↓ models.py (CasaOSMeta 骨架，description 为空)
+    ↓ llm_stage1.py (LLM 填充英文描述) 或 template_stage.py (模板模式，不调 LLM)
+    ↓ pipeline.py (apply_params_to_meta 覆盖用户参数)
+    ↓ i18n.py (wrap_multilang: 短文本查表，长文本保留英文)
+    ↓ yaml_out.py (合并回原 compose，生成 x-casaos)
+    ↓ compose_normalize.py (可选: AppStore 格式规范化)
 ```
 
-### 关键文件
+### 模块间关系
 
-- **`casaos_gen/models.py`**: Pydantic 数据模型定义（`CasaOSMeta`, `AppMeta`, `ServiceMeta` 等）
-- **`casaos_gen/parser.py`**: Compose 解析与结构推断（主服务、端口、分类、author）
-- **`casaos_gen/infer.py`**: 推断逻辑实现（分类规则、端口优先级等）
-- **`casaos_gen/llm_stage1.py`**: Stage 1 LLM 调用与 Prompt 构建
-- **`casaos_gen/llm_translate.py`**: LLM 翻译功能（可选的自动多语言翻译）
-- **`casaos_gen/i18n.py`**: 多语言包装与翻译表管理
-- **`casaos_gen/yaml_out.py`**: 最终 YAML 输出构建
-- **`casaos_gen/pipeline.py`**: 高层流程编排与辅助函数
-- **`casaos_gen/incremental.py`**: 增量更新与版本管理
-- **`casaos_gen/diff_engine.py`**: Compose 差异检测引擎
-- **`casaos_gen/version_manager.py`**: 元数据版本控制
-- **`casaos_gen/compose_normalize.py`**: AppStore 格式规范化
-- **`casaos_gen/template_stage.py`**: 模板生成（不调用 LLM）
-- **`casaos_gen/cli.py`**: CLI 入口与参数解析
-- **`casaos_gen/webui.py`**: FastAPI Web UI 实现
-- **`casaos_gen/constants.py`**: 常量定义（CDN 路径、默认值等）
+- **`cli.py`** → 入口，解析参数后分发到不同流程：普通 stage 流程调 `main.py`，增量更新调 `incremental.py`
+- **`main.py`** → 编排 `run_stage_one`/`stage_two_from_meta`/`write_final_compose` 等高层函数
+- **`pipeline.py`** → Web UI 和 CLI 共用的辅助函数（`build_meta`/`fill_meta_with_llm`/`render_compose`/`apply_params_to_meta`）
+- **`webui.py`** → FastAPI 服务，使用全局 `WebState` 保持会话状态，调 `pipeline.py` 处理逻辑
+- **`incremental.py`** → 增量更新流程，依赖 `diff_engine.py`（差异检测）和 `version_manager.py`（版本控制）
+- **`refine_mode.py`** → AI 润色模式：对 `user_input=True` 的字段保持原意、改进表达
 
-### 前端
+### CasaOSMeta 模型结构
 
-- **`frontend/app.jsx`**: React 单页应用（卡片式 UI）
-- **`frontend/index.html`**: HTML 入口
+`CasaOSMeta` 是整个管道的核心数据结构（`models.py`）：
 
-## 开发注意事项
+```
+CasaOSMeta
+├── app: AppMeta (title, tagline, description, category, author, developer, main, port_map, icon, thumbnail, screenshot_link, architectures, index, scheme)
+└── services: Dict[str, ServiceMeta]
+    └── ServiceMeta
+        ├── envs: List[EnvItem]     (container, description, user_input, multilang)
+        ├── ports: List[PortItem]    (container, description, user_input, multilang)
+        └── volumes: List[VolumeItem] (container, description, user_input, multilang)
+```
 
-### LLM 集成
+- `user_input: bool` — 标记用户提供的内容，LLM 会润色而非重写
+- `multilang: bool` — 控制该字段是否在 Stage 2 做多语言扩展
 
-- Stage 1 使用 OpenAI Chat Completions API（兼容格式）
-- 支持自定义 Base URL（如 Ollama、vLLM 等本地部署）
-- Prompt 设计严格禁止 LLM 修改结构，仅填充文本字段
-- 使用 Pydantic 校验确保 LLM 输出符合 Schema
+### 前端架构
 
-### 多语言处理
+React 单页应用（通过 CDN 加载，无构建步骤），位于 `frontend/`：
 
-- 默认支持 15 种语言：`de_DE, el_GR, en_GB, en_US, fr_FR, hr_HR, it_IT, ja_JP, ko_KR, nb_NO, pt_PT, ru_RU, sv_SE, tr_TR, zh_CN`
-- 短文本（< 60 字符）优先查翻译表 `casaos_gen/translations.yml`
-- 长文本默认仅保留英文，可选启用 LLM 自动翻译（`--auto-translate`）
-- 翻译表可通过 `--translations` 参数自定义
+- **`app.jsx`** — 主应用，步骤导航逻辑
+- **`steps/`** — 四步流程：`StepLoadCompose` → `StepMetadata` → `StepPreview` → `StepExport`
+- **`components/`** — 复用组件（Button, Card, Form, Tabs, Toast, CodeViewer, Dropzone, Stepper）
+- **`index.html`** — 入口，引用 `app.jsx` 和 `styles.css`
 
-### 增量更新机制
+## 关键约定
 
-- 工作目录默认为 `.casaos-gen/`，存储历史版本
-- 自动检测 compose 变更（新增/删除/修改服务、环境变量、端口、卷）
-- 保留未变更部分的现有描述，仅对新增/修改部分调用 LLM
-- 支持版本回滚和差异对比
+### CLI Stage 参数
+
+| `--stage` | 说明 | 是否调 LLM |
+|-----------|------|-----------|
+| `all` | 完整流程 | 是 |
+| `1` | 仅 Stage 1 + 自动输出多语言 compose | 是 |
+| `2` | 仅 Stage 2（需 `--meta-input`） | 否 |
+| `template` | 从 params 生成模板 | 否 |
+| `params` | 生成 params.yml 骨架 | 否 |
+| `normalize` | 仅规范化已有 compose | 否 |
+
+### 多语言
+
+默认 15 种语言：`de_DE, el_GR, en_GB, en_US, fr_FR, hr_HR, it_IT, ja_JP, ko_KR, nb_NO, pt_PT, ru_RU, sv_SE, tr_TR, zh_CN`
+
+翻译策略（`i18n.py:wrap_multilang`）：
+- 短文本（< 60 字符且无换行）→ 查 `translations.yml` 翻译表
+- 长文本 → 默认仅保留 `en_US`，可用 `--auto-translate` 启用 LLM 批量翻译（`llm_translate.py`）
 
 ### AppStore 格式
 
-- 使用 `--appstore` 标志启用
-- 自动规范化 `ports` 为 long syntax
-- 自动规范化 `volumes` 为 bind mount，路径统一为 `/DATA/AppData/$AppID/...`
-- 需要在 `params.yml` 中指定 `app.store_folder`
+`--appstore` 标志（配合 `params.yml` 中的 `app.store_folder`）：
+- `ports` 规范化为 long syntax
+- `volumes` 规范化为 bind mount，路径 `/DATA/AppData/$AppID/...`
+- `icon`/`thumbnail`/`screenshot_link` 自动填充 CDN 路径（见 `constants.py:CDN_BASE`）
 
-### Params 配置
+### 增量更新
 
-`params.yml` 用于覆盖自动推断的元数据：
+工作目录 `.casaos-gen/`：
+- `meta.current.json` — 当前元数据
+- `compose.hash` — compose 文件 SHA256
+- `history/` — 最多 3 个历史版本，自动轮转
 
-```yaml
-app:
-  store_folder: MyApp        # CDN 目录名（必需）
-  author: IceWhaleTech       # 原作者
-  developer: fromxiaobai     # 开发者（可选）
-  architectures: [amd64, arm64]
-  title: My Application
-  tagline: Short description
-  description: |
-    Long description here.
-  category: Utilities
-  icon: https://cdn.example.com/icon.png
-  thumbnail: https://cdn.example.com/thumb.png
-  screenshot_link:
-    - https://cdn.example.com/screenshot-1.png
+### Web UI API 流程
 
-services:
-  web:
-    envs:
-      - container: PORT
-        description: Application port
-    ports:
-      - container: "8080"
-        description: Web interface
-    volumes:
-      - container: /data
-        description: Application data
+```
+POST /api/compose       → 上传 compose，构建元数据骨架
+POST /api/meta/fill     → 填充元数据（mode=llm 或 mode=params）
+POST /api/render        → 渲染多语言 YAML
+POST /api/export        → 导出最终 YAML
 ```
 
-多语言字段支持：
-- 单语言字符串（自动复制到所有语言）
-- 多语言字典：`{en_US: "English", zh_CN: "中文"}`
+版本管理 API：`GET /api/versions`、`POST /api/versions/rollback`、`GET /api/diff`、`POST /api/incremental`
 
-### 测试
+Web UI 的 LLM 配置持久化在 `llm_config.json`。
 
-- 测试文件位于 `tests/` 目录
-- 使用 Python 标准库 `unittest`
-- 运行测试：`python -m unittest discover -s tests`
+## LLM 集成注意事项
 
-### 日志
+- 使用 OpenAI Chat Completions API 兼容格式，支持自定义 Base URL（Ollama、vLLM 等）
+- Prompt 严格禁止 LLM 修改 JSON 结构，仅填充文本字段
+- LLM 必须返回纯 JSON（禁止 Markdown 代码块），由 Pydantic 校验
+- 环境变量 `OPENAI_API_KEY` 或 Web UI 中配置 API Key
 
-- 使用标准 `logging` 模块
-- `--verbose` 标志启用 DEBUG 级别日志
-- 关键日志点：推断结果、LLM 调用、Schema 校验、文件写入
+## 常见问题
 
-## Web UI API 端点
-
-标准流程（推荐）：
-- `POST /api/compose` - 上传 compose 构建元数据骨架
-- `POST /api/meta/fill` - 填充元数据（`mode=llm` 或 `mode=params`）
-- `POST /api/render` - 渲染为多语言 YAML
-- `POST /api/export` - 导出最终 YAML
-
-已弃用（保留向后兼容）：
-- `/api/upload`
-- `/api/template`
-
-## 环境变量
-
-- `OPENAI_API_KEY`: OpenAI API 密钥（Stage 1 必需，除非使用自定义 Base URL）
-- Web UI 的 LLM 配置持久化在 `llm_config.json`
-
-## 项目依赖
-
-核心依赖：
-- `openai>=1.51.0` - LLM API 客户端
-- `pydantic>=2.9.2` - 数据模型与校验
-- `PyYAML>=6.0.2` - YAML 解析与生成
-- `fastapi>=0.115.5` - Web UI 框架
-- `uvicorn>=0.32.0` - ASGI 服务器
-- `python-multipart>=0.0.9` - 文件上传支持
-
-## 常见问题排查
-
-1. **LLM 返回格式错误**：检查 Prompt 是否明确禁止 Markdown 代码块，确保返回纯 JSON
-2. **Schema 校验失败**：查看日志中的 Pydantic 错误详情，通常是 LLM 添加/删除了字段
-3. **翻译表未生效**：确认 `translations.yml` 格式正确，key 必须与英文文本完全匹配
-4. **增量更新未保留描述**：检查 `.casaos-gen/` 目录是否存在历史版本
-5. **AppStore 格式问题**：确保 `params.yml` 中设置了 `app.store_folder`
-
-## 代码风格
-
-- 使用 Python 3.10+ 特性（类型注解、match 语句等）
-- 遵循 PEP 8 代码风格
-- 函数使用类型提示
-- 模块级 docstring 说明模块用途
-- 复杂逻辑添加注释说明
+1. **LLM 返回格式错误**：Prompt 中已禁止 Markdown 代码块，若仍出现则检查 `llm_stage1.py:build_stage1_prompt` 中的指令
+2. **Schema 校验失败**：查看 Pydantic 错误详情，通常是 LLM 添加/删除/重命名了字段
+3. **翻译表未生效**：`translations.yml` 的 key 必须与英文文本完全匹配（含大小写和空格）
+4. **增量更新未保留描述**：确认 `.casaos-gen/` 目录存在且含 `meta.current.json`
+5. **AppStore 格式问题**：`params.yml` 必须设置 `app.store_folder`

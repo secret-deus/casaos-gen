@@ -389,7 +389,7 @@
           developer: String(state.params.draft.developer || "").trim(),
           title: String(state.params.draft.title || "").trim(),
           tagline: String(state.params.draft.tagline || "").trim(),
-          description: state.params.draft.description || "",
+          description: String(state.params.draft.description || "").trim(),
           category: String(state.params.draft.category || "").trim(),
           main: String(state.params.draft.main || "").trim(),
           port_map: String(state.params.draft.port_map || "").trim(),

@@ -55,6 +55,7 @@ def wrap_multilang(
 ) -> Dict[str, str]:
     translations = translation_map or TRANSLATION_MAP
     text = english or ""
+    lookup_key = text.strip()
     result: Dict[str, str] = {}
     for lang in languages:
         if not lang:
@@ -62,7 +63,7 @@ def wrap_multilang(
         if lang == "en_US":
             result[lang] = text
             continue
-        localized = translations.get(text, {}).get(lang)
+        localized = translations.get(lookup_key, {}).get(lang)
         result[lang] = localized if localized else text
     if "en_US" not in result:
         result["en_US"] = text

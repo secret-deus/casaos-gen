@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import uvicorn
 import yaml
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -42,7 +44,17 @@ INDEX_HTML = FRONTEND_DIR / "index.html"
 
 
 @dataclass
-class WebState:
+class LLMConfig:
+    """Global LLM configuration shared across all sessions."""
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model: str = "gpt-4.1-mini"
+    temperature: float = 0.2
+
+
+@dataclass
+class SessionState:
+    """Per-session state isolated by cookie."""
     compose_data: Optional[dict] = None
     compose_text: str = ""
     meta: Optional[CasaOSMeta] = None
@@ -50,23 +62,44 @@ class WebState:
     translation_map: Dict[str, Dict[str, str]] = field(
         default_factory=lambda: {key: dict(value) for key, value in TRANSLATION_MAP.items()}
     )
-    llm_base_url: Optional[str] = None
-    llm_api_key: Optional[str] = None
-    llm_model: str = "gpt-4.1-mini"
-    llm_temperature: float = 0.2
+    last_access: float = field(default_factory=time.time)
 
 
-STATE = WebState()
+_SESSIONS: Dict[str, SessionState] = {}
+_SESSION_COOKIE = "casaos_sid"
+_SESSION_TTL = 3600 * 4  # 4 hours
+LLM_CFG = LLMConfig()
+
 app = FastAPI(title="CasaOS Compose Generator UI")
 
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 
-def _require_meta() -> CasaOSMeta:
-    if STATE.meta is None or STATE.compose_data is None:
+def get_session(request: Request, response: Response) -> SessionState:
+    """Get or create a session for the current request."""
+    now = time.time()
+    # Lazy cleanup of expired sessions
+    for sid in [k for k, v in _SESSIONS.items() if now - v.last_access > _SESSION_TTL]:
+        del _SESSIONS[sid]
+    # Get or create session
+    sid = request.cookies.get(_SESSION_COOKIE)
+    if sid and sid in _SESSIONS:
+        _SESSIONS[sid].last_access = now
+        return _SESSIONS[sid]
+    sid = uuid.uuid4().hex
+    session = SessionState()
+    _SESSIONS[sid] = session
+    response.set_cookie(
+        key=_SESSION_COOKIE, value=sid, httponly=True, samesite="lax", max_age=_SESSION_TTL
+    )
+    return session
+
+
+def _require_meta(session: SessionState) -> CasaOSMeta:
+    if session.meta is None or session.compose_data is None:
         raise HTTPException(status_code=400, detail="No compose metadata is loaded yet.")
-    return STATE.meta
+    return session.meta
 
 
 def _parse_service_target(target: str) -> Tuple[str, str, str]:
@@ -82,47 +115,47 @@ def _parse_service_target(target: str) -> Tuple[str, str, str]:
     return service_name, field_type, identifier
 
 
-def _propagate_translation(text: str) -> None:
+def _propagate_translation(text: str, session: SessionState) -> None:
     if not text:
         return
-    entry = STATE.translation_map.setdefault(text, {})
-    for lang in STATE.languages:
+    entry = session.translation_map.setdefault(text, {})
+    for lang in session.languages:
         if lang == "en_US":
             continue
         entry[lang] = text
 
 
-def _ensure_stage2_structure(require_meta: bool = False) -> None:
-    if STATE.compose_data is None:
+def _ensure_stage2_structure(session: SessionState, require_meta: bool = False) -> None:
+    if session.compose_data is None:
         raise HTTPException(status_code=400, detail="No compose file loaded.")
-    if STATE.compose_data.get("x-casaos"):
+    if session.compose_data.get("x-casaos"):
         return
-    if STATE.meta is None:
+    if session.meta is None:
         if require_meta:
             raise HTTPException(status_code=400, detail="Stage 1 metadata unavailable. Run Stage 1 first.")
         return
     try:
-        STATE.compose_data = render_compose(
-            STATE.compose_data,
-            STATE.meta,
-            languages=STATE.languages,
-            translation_map_override=STATE.translation_map,
+        session.compose_data = render_compose(
+            session.compose_data,
+            session.meta,
+            languages=session.languages,
+            translation_map_override=session.translation_map,
             auto_translate=True,
-            llm_model=STATE.llm_model,
-            llm_temperature=STATE.llm_temperature,
-            llm_api_key=STATE.llm_api_key,
-            llm_base_url=STATE.llm_base_url,
+            llm_model=LLM_CFG.model,
+            llm_temperature=LLM_CFG.temperature,
+            llm_api_key=LLM_CFG.api_key,
+            llm_base_url=LLM_CFG.base_url,
         )
     except LLMTranslationError as exc:
         logger.warning(
             "Stage 2 auto-translate failed; falling back to translation table/copy behavior: %s",
             exc,
         )
-        STATE.compose_data = render_compose(
-            STATE.compose_data,
-            STATE.meta,
-            languages=STATE.languages,
-            translation_map_override=STATE.translation_map,
+        session.compose_data = render_compose(
+            session.compose_data,
+            session.meta,
+            languages=session.languages,
+            translation_map_override=session.translation_map,
             auto_translate=False,
         )
 
@@ -132,10 +165,10 @@ def _require_llm_client():
         raise HTTPException(status_code=500, detail="openai package is not installed.")
 
     client_kwargs = {}
-    if STATE.llm_api_key:
-        client_kwargs["api_key"] = STATE.llm_api_key
-    if STATE.llm_base_url:
-        client_kwargs["base_url"] = STATE.llm_base_url
+    if LLM_CFG.api_key:
+        client_kwargs["api_key"] = LLM_CFG.api_key
+    if LLM_CFG.base_url:
+        client_kwargs["base_url"] = LLM_CFG.base_url
     try:
         return OpenAI(**client_kwargs)
     except Exception as exc:  # pragma: no cover - defensive logging
@@ -197,13 +230,13 @@ SOURCE_TEXT:
 """.strip()
 
 
-def _translate_multilang_with_llm(text: str, source_language: Optional[str]) -> Dict[str, str]:
+def _translate_multilang_with_llm(text: str, source_language: Optional[str], session: SessionState) -> Dict[str, str]:
     client = _require_llm_client()
-    prompt = _build_translation_prompt(text, STATE.languages, source_language)
-    temperature = max(0.0, min(float(STATE.llm_temperature), 0.3))
+    prompt = _build_translation_prompt(text, session.languages, source_language)
+    temperature = max(0.0, min(float(LLM_CFG.temperature), 0.3))
     try:
         response = client.chat.completions.create(
-            model=STATE.llm_model,
+            model=LLM_CFG.model,
             messages=[{"role": "user", "content": prompt}],
             temperature=temperature,
         )
@@ -214,7 +247,7 @@ def _translate_multilang_with_llm(text: str, source_language: Optional[str]) -> 
     data = _parse_llm_json_response(content)
 
     translations: Dict[str, str] = {}
-    for lang in STATE.languages:
+    for lang in session.languages:
         value = data.get(lang)
         translations[lang] = "" if value is None else str(value)
 
@@ -222,7 +255,7 @@ def _translate_multilang_with_llm(text: str, source_language: Optional[str]) -> 
         translations[source_language] = text
 
     english_text = translations.get("en_US") or ""
-    for lang in STATE.languages:
+    for lang in session.languages:
         if translations[lang].strip():
             continue
         if lang == "en_US":
@@ -233,12 +266,12 @@ def _translate_multilang_with_llm(text: str, source_language: Optional[str]) -> 
     return translations
 
 
-def _update_translation_map_from_multilang(translations: Dict[str, str]) -> None:
+def _update_translation_map_from_multilang(translations: Dict[str, str], session: SessionState) -> None:
     english_text = str(translations.get("en_US") or "").strip()
     if not english_text:
         return
-    entry = STATE.translation_map.setdefault(english_text, {})
-    for lang in STATE.languages:
+    entry = session.translation_map.setdefault(english_text, {})
+    for lang in session.languages:
         if lang == "en_US":
             continue
         candidate = str(translations.get(lang) or "").strip()
@@ -246,8 +279,8 @@ def _update_translation_map_from_multilang(translations: Dict[str, str]) -> None
             entry[lang] = candidate
 
 
-def _sync_meta_from_multilang_target(target: str, translations: Dict[str, str]) -> None:
-    meta = STATE.meta
+def _sync_meta_from_multilang_target(target: str, translations: Dict[str, str], session: SessionState) -> None:
+    meta = session.meta
     if meta is None:
         return
 
@@ -275,8 +308,8 @@ def _sync_meta_from_multilang_target(target: str, translations: Dict[str, str]) 
         target_item.description = english_text
 
 
-def _resolve_app_stage2_value(field_path: str):
-    compose = STATE.compose_data or {}
+def _resolve_app_stage2_value(field_path: str, session: SessionState):
+    compose = session.compose_data or {}
     scope = compose.get("x-casaos") or {}
     for key in field_path.split("."):
         if not isinstance(scope, dict):
@@ -287,8 +320,8 @@ def _resolve_app_stage2_value(field_path: str):
     return scope
 
 
-def _resolve_service_stage2_multilang(service_name: str, field_type: str, identifier: str):
-    compose = STATE.compose_data or {}
+def _resolve_service_stage2_multilang(service_name: str, field_type: str, identifier: str, session: SessionState):
+    compose = session.compose_data or {}
     services = compose.get("services") or {}
     service = services.get(service_name) or {}
     x_block = service.get("x-casaos") or {}
@@ -303,8 +336,8 @@ def _resolve_service_stage2_multilang(service_name: str, field_type: str, identi
     return None
 
 
-def _resolve_service_stage2_single(service_name: str, field_path: str):
-    compose = STATE.compose_data or {}
+def _resolve_service_stage2_single(service_name: str, field_path: str, session: SessionState):
+    compose = session.compose_data or {}
     services = compose.get("services") or {}
     service = services.get(service_name) or {}
     scope = service.get("x-casaos") or {}
@@ -317,7 +350,7 @@ def _resolve_service_stage2_single(service_name: str, field_path: str):
     return scope
 
 
-def _collect_target_context(target: Optional[str]) -> str:
+def _collect_target_context(target: Optional[str], session: SessionState) -> str:
     if not target:
         return (
             "Target: general editing mode. Help the user craft CasaOS metadata for compose files and "
@@ -328,11 +361,11 @@ def _collect_target_context(target: Optional[str]) -> str:
 
     if target.startswith("app."):
         field_path = target.split(".", 1)[1]
-        if STATE.meta:
+        if session.meta:
             attr_name = field_path.split(".", 1)[0]
-            if hasattr(STATE.meta.app, attr_name):
-                lines.append(f"Stage 1 value: {getattr(STATE.meta.app, attr_name)}")
-        stage2_value = _resolve_app_stage2_value(field_path)
+            if hasattr(session.meta.app, attr_name):
+                lines.append(f"Stage 1 value: {getattr(session.meta.app, attr_name)}")
+        stage2_value = _resolve_app_stage2_value(field_path, session)
         if stage2_value is not None:
             lines.append(f"Stage 2 value: {stage2_value}")
         return "\n".join(lines)
@@ -341,14 +374,14 @@ def _collect_target_context(target: Optional[str]) -> str:
     if len(parts) >= 4 and parts[0] == "service" and parts[2] in {"env", "port", "volume"}:
         service_name, field_type = parts[1], parts[2]
         identifier = ":".join(parts[3:])
-        if STATE.meta:
-            service_meta = STATE.meta.services.get(service_name)
+        if session.meta:
+            service_meta = session.meta.services.get(service_name)
             if service_meta:
                 collection = getattr(service_meta, f"{field_type}s", [])
                 entry = next((item for item in collection if item.container == identifier), None)
                 if entry:
                     lines.append(f"Stage 1 value: {entry.description}")
-        stage2_value = _resolve_service_stage2_multilang(service_name, field_type, identifier)
+        stage2_value = _resolve_service_stage2_multilang(service_name, field_type, identifier, session)
         if stage2_value is not None:
             lines.append(f"Stage 2 value: {stage2_value}")
         return "\n".join(lines)
@@ -356,7 +389,7 @@ def _collect_target_context(target: Optional[str]) -> str:
     if len(parts) >= 3 and parts[0] == "service":
         service_name = parts[1]
         field_path = ":".join(parts[2:])
-        stage2_value = _resolve_service_stage2_single(service_name, field_path)
+        stage2_value = _resolve_service_stage2_single(service_name, field_path, session)
         if stage2_value is not None:
             lines.append(f"Stage 2 value: {stage2_value}")
         return "\n".join(lines)
@@ -539,9 +572,9 @@ def _update_meta_field(meta: CasaOSMeta, payload: FieldUpdate) -> None:
     target_item.description = payload.value
 
 
-def _update_stage2_multi_field(payload: Stage2MultiUpdate) -> List[str]:
-    _ensure_stage2_structure(require_meta=True)
-    compose = STATE.compose_data or {}
+def _update_stage2_multi_field(payload: Stage2MultiUpdate, session: SessionState) -> List[str]:
+    _ensure_stage2_structure(session, require_meta=True)
+    compose = session.compose_data or {}
     overwrite_all = bool(payload.overwrite_all_languages)
     language = (payload.language or "").strip()
     warnings: List[str] = []
@@ -551,36 +584,36 @@ def _update_stage2_multi_field(payload: Stage2MultiUpdate) -> List[str]:
                 status_code=400,
                 detail="language is required when overwrite_all_languages is false.",
             )
-        if language not in STATE.languages:
+        if language not in session.languages:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unknown language '{language}'. Available: {', '.join(STATE.languages)}",
+                detail=f"Unknown language '{language}'. Available: {', '.join(session.languages)}",
             )
 
     source_language = language or None
     if source_language and source_language.lower() in {"auto", "detect"}:
         source_language = None
-    if source_language and source_language not in STATE.languages:
+    if source_language and source_language not in session.languages:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown language '{source_language}'. Available: {', '.join(STATE.languages)}",
+            detail=f"Unknown language '{source_language}'. Available: {', '.join(session.languages)}",
         )
 
     translations: Optional[Dict[str, str]] = None
     if overwrite_all:
         try:
-            translations = _translate_multilang_with_llm(payload.value, source_language)
+            translations = _translate_multilang_with_llm(payload.value, source_language, session)
         except HTTPException as exc:  # pragma: no cover - depends on network/LLM availability
             logger.warning(
                 "LLM translation failed during multi-language update; falling back to copy behavior: %s",
                 exc.detail,
             )
-            translations = {lang: payload.value for lang in STATE.languages}
+            translations = {lang: payload.value for lang in session.languages}
             warnings.append("LLM unavailable; copied input to all locales (no translation performed).")
         # Keep Stage 1 / translation map consistent so a future re-render won't erase translations.
-        _sync_meta_from_multilang_target(payload.target, translations)
+        _sync_meta_from_multilang_target(payload.target, translations, session)
         if payload.target in {"app.title", "app.tagline", "app.description"} or payload.target.startswith("service:"):
-            _update_translation_map_from_multilang(translations)
+            _update_translation_map_from_multilang(translations, session)
 
     if payload.target.startswith("app."):
         field_path = payload.target.split(".", 1)[1]
@@ -594,7 +627,7 @@ def _update_stage2_multi_field(payload: Stage2MultiUpdate) -> List[str]:
             multilang = {}
             scope[parts[-1]] = multilang
         if overwrite_all:
-            for lang in STATE.languages:
+            for lang in session.languages:
                 multilang[lang] = translations.get(lang, payload.value) if translations else payload.value
         else:
             multilang[language] = payload.value
@@ -626,16 +659,16 @@ def _update_stage2_multi_field(payload: Stage2MultiUpdate) -> List[str]:
         desc = {}
         target_item["description"] = desc
     if overwrite_all:
-        for lang in STATE.languages:
+        for lang in session.languages:
             desc[lang] = translations.get(lang, payload.value) if translations else payload.value
     else:
         desc[language] = payload.value
     return warnings
 
 
-def _update_stage2_single_field(payload: Stage2SingleUpdate) -> None:
-    _ensure_stage2_structure(require_meta=True)
-    compose = STATE.compose_data or {}
+def _update_stage2_single_field(payload: Stage2SingleUpdate, session: SessionState) -> None:
+    _ensure_stage2_structure(session, require_meta=True)
+    compose = session.compose_data or {}
 
     if payload.target.startswith("app."):
         field_path = payload.target.split(".", 1)[1]
@@ -673,18 +706,18 @@ async def index() -> HTMLResponse:
 
 
 @app.get("/api/state")
-async def get_state() -> dict:
+async def get_state(session: SessionState = Depends(get_session)) -> dict:
     return {
-        "languages": STATE.languages,
-        "has_compose": STATE.compose_data is not None,
-        "has_meta": STATE.meta is not None,
-        "has_stage2": bool(STATE.compose_data and STATE.compose_data.get("x-casaos")),
-        "meta": STATE.meta.model_dump() if STATE.meta else None,
+        "languages": session.languages,
+        "has_compose": session.compose_data is not None,
+        "has_meta": session.meta is not None,
+        "has_stage2": bool(session.compose_data and session.compose_data.get("x-casaos")),
+        "meta": session.meta.model_dump() if session.meta else None,
         "llm": {
-            "base_url": STATE.llm_base_url,
-            "api_key": bool(STATE.llm_api_key),
-            "model": STATE.llm_model,
-            "temperature": STATE.llm_temperature,
+            "base_url": LLM_CFG.base_url,
+            "api_key": bool(LLM_CFG.api_key),
+            "model": LLM_CFG.model,
+            "temperature": LLM_CFG.temperature,
         },
     }
 
@@ -700,16 +733,16 @@ async def set_llm_config(
     return {
         "status": "ok",
         "llm": {
-            "base_url": STATE.llm_base_url,
-            "api_key": bool(STATE.llm_api_key),
-            "model": STATE.llm_model,
-            "temperature": STATE.llm_temperature,
+            "base_url": LLM_CFG.base_url,
+            "api_key": bool(LLM_CFG.api_key),
+            "model": LLM_CFG.model,
+            "temperature": LLM_CFG.temperature,
         },
     }
 
 
 @app.post("/api/compose")
-async def load_compose(file: UploadFile = File(...)) -> dict:
+async def load_compose(file: UploadFile = File(...), session: SessionState = Depends(get_session)) -> dict:
     try:
         text = (await file.read()).decode("utf-8")
         compose_data = parse_compose_text(text)
@@ -717,14 +750,14 @@ async def load_compose(file: UploadFile = File(...)) -> dict:
         raise HTTPException(status_code=400, detail=f"Failed to parse compose file: {exc}") from exc
     meta = build_meta(compose_data)
     _seed_meta_from_existing_compose(meta, compose_data)
-    STATE.compose_data = compose_data
-    STATE.compose_text = text
-    STATE.meta = meta
+    session.compose_data = compose_data
+    session.compose_text = text
+    session.meta = meta
     return {"status": "ok", "message": "Compose loaded.", "meta": meta.model_dump()}
 
 
 @app.post("/api/compose-text")
-async def load_compose_text(payload: ComposeText) -> dict:
+async def load_compose_text(payload: ComposeText, session: SessionState = Depends(get_session)) -> dict:
     raw_text = payload.text or ""
     if not raw_text.strip():
         raise HTTPException(status_code=400, detail="Compose text is empty.")
@@ -734,9 +767,9 @@ async def load_compose_text(payload: ComposeText) -> dict:
         raise HTTPException(status_code=400, detail=f"Failed to parse compose text: {exc}") from exc
     meta = build_meta(compose_data)
     _seed_meta_from_existing_compose(meta, compose_data)
-    STATE.compose_data = compose_data
-    STATE.compose_text = raw_text
-    STATE.meta = meta
+    session.compose_data = compose_data
+    session.compose_text = raw_text
+    session.meta = meta
     return {"status": "ok", "message": "Compose loaded.", "meta": meta.model_dump()}
 
 
@@ -752,8 +785,9 @@ async def fill_metadata(
     llm_base_url: Optional[str] = Form(None),
     llm_api_key: Optional[str] = Form(None),
     llm_prompt: Optional[str] = Form(None),
+    session: SessionState = Depends(get_session),
 ) -> dict:
-    if STATE.compose_data is None:
+    if session.compose_data is None:
         raise HTTPException(status_code=400, detail="No compose file loaded.")
     warnings: List[str] = []
 
@@ -774,8 +808,8 @@ async def fill_metadata(
             use_params_value = False
 
     if not use_llm_value and not use_params_value:
-        meta = STATE.meta or build_meta(STATE.compose_data)
-        STATE.meta = meta
+        meta = session.meta or build_meta(session.compose_data)
+        session.meta = meta
         return {
             "status": "ok",
             "message": "No fill requested; metadata unchanged.",
@@ -802,20 +836,20 @@ async def fill_metadata(
         else:
             params = {"app": {}}
 
-    meta = STATE.meta or build_meta(STATE.compose_data)
+    meta = session.meta or build_meta(session.compose_data)
     if use_params_value:
         meta = apply_params_to_meta(meta, params)
 
     if use_llm_value:
-        model_name = model or STATE.llm_model
-        temp_value = STATE.llm_temperature if temperature is None else temperature
+        model_name = model or LLM_CFG.model
+        temp_value = LLM_CFG.temperature if temperature is None else temperature
         try:
             meta = fill_meta_with_llm(
                 meta,
                 model=model_name,
                 temperature=temp_value,
-                api_key=llm_api_key or STATE.llm_api_key,
-                base_url=llm_base_url or STATE.llm_base_url,
+                api_key=llm_api_key or LLM_CFG.api_key,
+                base_url=llm_base_url or LLM_CFG.base_url,
                 prompt_instructions=llm_prompt,
             )
         except Exception as exc:  # pragma: no cover - depends on network/LLM availability
@@ -826,7 +860,7 @@ async def fill_metadata(
         if use_params_value:
             meta = apply_params_to_meta(meta, params)
 
-    STATE.meta = meta
+    session.meta = meta
 
     mode_label = " + ".join(
         part for part in ("LLM" if use_llm_value else "", "Params" if use_params_value else "") if part
@@ -840,23 +874,23 @@ async def fill_metadata(
 
 
 @app.post("/api/render")
-async def render_stage2() -> dict:
-    if STATE.compose_data is None:
+async def render_stage2(session: SessionState = Depends(get_session)) -> dict:
+    if session.compose_data is None:
         raise HTTPException(status_code=400, detail="No compose file loaded.")
-    if STATE.meta is None:
+    if session.meta is None:
         raise HTTPException(status_code=400, detail="Stage 1 metadata unavailable.")
     warnings: List[str] = []
     try:
-        STATE.compose_data = render_compose(
-            STATE.compose_data,
-            STATE.meta,
-            languages=STATE.languages,
-            translation_map_override=STATE.translation_map,
+        session.compose_data = render_compose(
+            session.compose_data,
+            session.meta,
+            languages=session.languages,
+            translation_map_override=session.translation_map,
             auto_translate=True,
-            llm_model=STATE.llm_model,
-            llm_temperature=STATE.llm_temperature,
-            llm_api_key=STATE.llm_api_key,
-            llm_base_url=STATE.llm_base_url,
+            llm_model=LLM_CFG.model,
+            llm_temperature=LLM_CFG.temperature,
+            llm_api_key=LLM_CFG.api_key,
+            llm_base_url=LLM_CFG.base_url,
         )
     except LLMTranslationError as exc:
         logger.warning(
@@ -866,14 +900,14 @@ async def render_stage2() -> dict:
         warnings.append(
             "LLM unavailable; rendered Stage 2 without auto-translation (other locales will copy en_US unless present in the translation table)."
         )
-        STATE.compose_data = render_compose(
-            STATE.compose_data,
-            STATE.meta,
-            languages=STATE.languages,
-            translation_map_override=STATE.translation_map,
+        session.compose_data = render_compose(
+            session.compose_data,
+            session.meta,
+            languages=session.languages,
+            translation_map_override=session.translation_map,
             auto_translate=False,
         )
-    return {"status": "ok", "compose": STATE.compose_data, "warnings": warnings}
+    return {"status": "ok", "compose": session.compose_data, "warnings": warnings}
 
 
 @app.post("/api/upload")
@@ -885,6 +919,7 @@ async def upload_compose(
     llm_base_url: Optional[str] = Form(None),
     llm_api_key: Optional[str] = Form(None),
     llm_prompt: Optional[str] = Form(None),
+    session: SessionState = Depends(get_session),
 ) -> dict:
     _log_deprecated("/api/upload", "/api/compose + /api/meta/fill (+ /api/render)")
     content = await file.read()
@@ -908,8 +943,8 @@ async def upload_compose(
         template_compose = render_compose(
             compose_data,
             meta,
-            languages=STATE.languages,
-            translation_map_override=STATE.translation_map,
+            languages=session.languages,
+            translation_map_override=session.translation_map,
             auto_translate=True,
             llm_model=model,
             llm_temperature=temperature,
@@ -920,14 +955,14 @@ async def upload_compose(
         logger.warning("Stage 2 build failed; falling back to minimal template: %s", exc)
         template_compose = compose_data
         template_compose["x-casaos"] = {
-            "title": wrap_multilang(meta.app.title, STATE.languages, STATE.translation_map),
-            "tagline": wrap_multilang(meta.app.tagline, STATE.languages, STATE.translation_map),
-            "description": wrap_multilang(meta.app.description, STATE.languages, STATE.translation_map),
+            "title": wrap_multilang(meta.app.title, session.languages, session.translation_map),
+            "tagline": wrap_multilang(meta.app.tagline, session.languages, session.translation_map),
+            "description": wrap_multilang(meta.app.description, session.languages, session.translation_map),
         }
 
-    STATE.compose_data = template_compose
-    STATE.compose_text = text
-    STATE.meta = meta
+    session.compose_data = template_compose
+    session.compose_text = text
+    session.meta = meta
     return {
         "message": "Compose uploaded.",
         "meta": meta.model_dump(),
@@ -940,6 +975,7 @@ async def upload_compose(
 async def build_template(
     compose_file: UploadFile = File(...),
     params_file: Optional[UploadFile] = File(None),
+    session: SessionState = Depends(get_session),
 ) -> PlainTextResponse:
     _log_deprecated("/api/template", "/api/compose + /api/meta/fill + /api/export")
     try:
@@ -963,60 +999,60 @@ async def build_template(
         template_compose = build_template_compose_from_data(
             compose_data,
             params=params,
-            languages=STATE.languages,
+            languages=session.languages,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Template generation failed: {exc}") from exc
 
-    STATE.compose_data = template_compose
-    STATE.compose_text = compose_text
-    STATE.meta = None
+    session.compose_data = template_compose
+    session.compose_text = compose_text
+    session.meta = None
 
     yaml_text = dump_yaml(template_compose)
     return PlainTextResponse(yaml_text, media_type="text/yaml")
 
 
 @app.post("/api/meta/update")
-async def update_meta_field(payload: FieldUpdate) -> dict:
-    meta = _require_meta()
+async def update_meta_field(payload: FieldUpdate, session: SessionState = Depends(get_session)) -> dict:
+    meta = _require_meta(session)
     _update_meta_field(meta, payload)
     if payload.propagate_all_languages:
-        _propagate_translation(payload.value)
-    if payload.sync_stage2 and STATE.compose_data and isinstance(STATE.compose_data.get("x-casaos"), dict):
+        _propagate_translation(payload.value, session)
+    if payload.sync_stage2 and session.compose_data and isinstance(session.compose_data.get("x-casaos"), dict):
         # Keep Stage 2 compose in sync for key app fields when editing Stage 1 meta.
-        app_x = STATE.compose_data["x-casaos"]
+        app_x = session.compose_data["x-casaos"]
         if payload.target in ("app.title", "app.tagline", "app.description"):
             attr_name = payload.target.split(".", 1)[1]
-            app_x[attr_name] = wrap_multilang(payload.value, STATE.languages, STATE.translation_map)
+            app_x[attr_name] = wrap_multilang(payload.value, session.languages, session.translation_map)
     return {"status": "ok", "meta": meta.model_dump()}
 
 
 @app.post("/api/stage2/update-multi")
-async def update_stage2_multi_field(payload: Stage2MultiUpdate) -> dict:
-    warnings = _update_stage2_multi_field(payload)
-    return {"status": "ok", "compose": STATE.compose_data, "warnings": warnings}
+async def update_stage2_multi_field(payload: Stage2MultiUpdate, session: SessionState = Depends(get_session)) -> dict:
+    warnings = _update_stage2_multi_field(payload, session)
+    return {"status": "ok", "compose": session.compose_data, "warnings": warnings}
 
 
 @app.post("/api/stage2/update-single")
-async def update_stage2_single_field(payload: Stage2SingleUpdate) -> dict:
-    _update_stage2_single_field(payload)
-    return {"status": "ok", "compose": STATE.compose_data}
+async def update_stage2_single_field(payload: Stage2SingleUpdate, session: SessionState = Depends(get_session)) -> dict:
+    _update_stage2_single_field(payload, session)
+    return {"status": "ok", "compose": session.compose_data}
 
 
 @app.post("/api/assistant/chat")
-async def assistant_chat(payload: AssistantChatRequest) -> dict:
+async def assistant_chat(payload: AssistantChatRequest, session: SessionState = Depends(get_session)) -> dict:
     if not payload.messages:
         raise HTTPException(status_code=400, detail="At least one message is required.")
     client = _require_llm_client()
-    context = _collect_target_context(payload.target)
+    context = _collect_target_context(payload.target, session)
     system_prompt = _build_assistant_prompt(context)
     chat_messages = [{"role": "system", "content": system_prompt}]
     chat_messages.extend({"role": msg.role, "content": msg.content} for msg in payload.messages)
     try:
         response = client.chat.completions.create(
-            model=STATE.llm_model,
+            model=LLM_CFG.model,
             messages=chat_messages,
-            temperature=STATE.llm_temperature,
+            temperature=LLM_CFG.temperature,
         )
     except Exception as exc:  # pragma: no cover - defensive logging
         raise HTTPException(status_code=400, detail=f"LLM request failed: {exc}") from exc
@@ -1025,11 +1061,11 @@ async def assistant_chat(payload: AssistantChatRequest) -> dict:
 
 
 @app.post("/api/export", response_class=PlainTextResponse)
-async def export_compose() -> PlainTextResponse:
-    if STATE.compose_data is None:
+async def export_compose(session: SessionState = Depends(get_session)) -> PlainTextResponse:
+    if session.compose_data is None:
         raise HTTPException(status_code=400, detail="No compose file loaded.")
-    _ensure_stage2_structure()
-    compose = STATE.compose_data
+    _ensure_stage2_structure(session)
+    compose = session.compose_data
     if not compose.get("x-casaos"):
         raise HTTPException(status_code=400, detail="Stage 2 data unavailable. Run Stage 1 first.")
     compose = normalize_compose_for_appstore(compose)
@@ -1045,6 +1081,8 @@ def run(host: str = "127.0.0.1", port: int = 8001) -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     run()
+
+
 def load_llm_config() -> None:
     if LLM_CONFIG_PATH.exists():
         try:
@@ -1052,10 +1090,10 @@ def load_llm_config() -> None:
         except json.JSONDecodeError:
             logger.warning("Failed to parse llm_config.json")
             return
-        STATE.llm_base_url = data.get("base_url")
-        STATE.llm_api_key = data.get("api_key")
-        STATE.llm_model = data.get("model", STATE.llm_model)
-        STATE.llm_temperature = data.get("temperature", STATE.llm_temperature)
+        LLM_CFG.base_url = data.get("base_url")
+        LLM_CFG.api_key = data.get("api_key")
+        LLM_CFG.model = data.get("model", LLM_CFG.model)
+        LLM_CFG.temperature = data.get("temperature", LLM_CFG.temperature)
 
 
 def save_llm_config(
@@ -1065,20 +1103,20 @@ def save_llm_config(
     temperature: Optional[float],
 ) -> None:
     if base_url is not None:
-        STATE.llm_base_url = base_url or None
+        LLM_CFG.base_url = base_url or None
     if api_key is not None:
-        STATE.llm_api_key = api_key or None
+        LLM_CFG.api_key = api_key or None
     if model is not None:
-        STATE.llm_model = model or STATE.llm_model
+        LLM_CFG.model = model or LLM_CFG.model
     if temperature is not None:
-        STATE.llm_temperature = temperature
+        LLM_CFG.temperature = temperature
     LLM_CONFIG_PATH.write_text(
         json.dumps(
             {
-                "base_url": STATE.llm_base_url,
-                "api_key": STATE.llm_api_key,
-                "model": STATE.llm_model,
-                "temperature": STATE.llm_temperature,
+                "base_url": LLM_CFG.base_url,
+                "api_key": LLM_CFG.api_key,
+                "model": LLM_CFG.model,
+                "temperature": LLM_CFG.temperature,
             },
             indent=2,
         ),
@@ -1129,18 +1167,18 @@ async def list_versions() -> dict:
 
 
 @app.post("/api/versions/rollback")
-async def rollback(payload: RollbackRequest) -> dict:
+async def rollback(payload: RollbackRequest, session: SessionState = Depends(get_session)) -> dict:
     """回滚到指定版本"""
     try:
         rollback_to_version(payload.version_file)
         # 重新加载元数据
         from .version_manager import VersionManager
         vm = VersionManager()
-        STATE.meta = vm.load_current_meta()
+        session.meta = vm.load_current_meta()
         return {
             "status": "ok",
             "message": f"已回滚到版本: {payload.version_file}",
-            "meta": STATE.meta.model_dump() if STATE.meta else None,
+            "meta": session.meta.model_dump() if session.meta else None,
         }
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1149,26 +1187,26 @@ async def rollback(payload: RollbackRequest) -> dict:
 
 
 @app.get("/api/diff")
-async def get_compose_diff() -> dict:
+async def get_compose_diff(session: SessionState = Depends(get_session)) -> dict:
     """获取当前 compose 文件与历史版本的差异"""
-    if STATE.compose_text is None:
+    if not session.compose_text:
         raise HTTPException(status_code=400, detail="No compose file loaded.")
-    
+
     try:
         # 保存当前 compose 到临时文件
         import tempfile
         with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False, encoding='utf-8') as f:
-            f.write(STATE.compose_text)
+            f.write(session.compose_text)
             temp_path = Path(f.name)
-        
+
         try:
             diff = show_compose_diff(temp_path)
         finally:
             temp_path.unlink()  # 删除临时文件
-        
+
         if diff is None:
             return {"status": "ok", "has_diff": False, "message": "没有旧版本可对比"}
-        
+
         return {
             "status": "ok",
             "has_diff": diff.has_changes(),
@@ -1184,27 +1222,29 @@ async def get_compose_diff() -> dict:
 
 
 @app.post("/api/incremental")
-async def incremental_update_api(payload: IncrementalUpdateRequest) -> dict:
+async def incremental_update_api(
+    payload: IncrementalUpdateRequest, session: SessionState = Depends(get_session)
+) -> dict:
     """执行增量更新"""
-    if STATE.compose_text is None:
+    if not session.compose_text:
         raise HTTPException(status_code=400, detail="No compose file loaded.")
-    
+
     try:
         # 保存当前 compose 到临时文件
         import tempfile
         with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False, encoding='utf-8') as f:
-            f.write(STATE.compose_text)
+            f.write(session.compose_text)
             temp_path = Path(f.name)
-        
+
         try:
             # LLM 配置
             llm_config = {
-                "model": STATE.llm_model,
-                "temperature": STATE.llm_temperature,
-                "api_key": STATE.llm_api_key,
-                "base_url": STATE.llm_base_url,
-            } if STATE.llm_api_key or STATE.llm_base_url else None
-            
+                "model": LLM_CFG.model,
+                "temperature": LLM_CFG.temperature,
+                "api_key": LLM_CFG.api_key,
+                "base_url": LLM_CFG.base_url,
+            } if LLM_CFG.api_key or LLM_CFG.base_url else None
+
             # 执行增量更新
             meta, diff = incremental_update(
                 compose_path=temp_path,
@@ -1214,19 +1254,19 @@ async def incremental_update_api(payload: IncrementalUpdateRequest) -> dict:
             )
         finally:
             temp_path.unlink()  # 删除临时文件
-        
+
         # 更新状态
-        STATE.meta = meta
-        
+        session.meta = meta
+
         # 重新解析 compose（因为可能有新增服务）
-        STATE.compose_data = parse_compose_text(STATE.compose_text)
-        
+        session.compose_data = parse_compose_text(session.compose_text)
+
         result = {
             "status": "ok",
             "message": "增量更新完成",
             "meta": meta.model_dump(),
         }
-        
+
         if diff and diff.has_changes():
             result["diff"] = {
                 "added_services": list(diff.added_services),
@@ -1234,7 +1274,7 @@ async def incremental_update_api(payload: IncrementalUpdateRequest) -> dict:
                 "added_fields_count": len(diff.added_fields),
                 "removed_fields_count": len(diff.removed_fields),
             }
-        
+
         return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Incremental update failed: {exc}") from exc
