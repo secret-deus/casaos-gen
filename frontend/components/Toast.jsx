@@ -4,9 +4,13 @@
 
   const cx = root.utils?.cx || ((...parts) => parts.filter(Boolean).join(" "));
 
-  function Toast({ title, message, variant = "info", onDismiss }) {
+  function Toast({ title, message, variant = "info", exiting = false, onDismiss }) {
     return (
-      <div className={cx("toast", `toast--${variant}`)} role="status" aria-live="polite">
+      <div
+        className={cx("toast", `toast--${variant}`, !exiting && "toast-enter", exiting && "toast--exiting")}
+        role="status"
+        aria-live="polite"
+      >
         <div className="toast__content">
           {title && <div className="toast__title">{title}</div>}
           {message && <div className="toast__message">{message}</div>}
@@ -32,6 +36,7 @@
             title={toast.title}
             message={toast.message}
             variant={toast.variant}
+            exiting={Boolean(toast.exiting)}
             onDismiss={() => onDismiss?.(toast.id)}
           />
         ))}

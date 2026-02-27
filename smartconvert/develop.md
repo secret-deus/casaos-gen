@@ -620,3 +620,82 @@ casaos_gen/
    * `yaml_out.py` 合并回原 compose，生成 `x-casaos` 字段并写入文件。
 
 3. 用户得到一个可以直接导入 CasaOS 的多语言应用定义。
+
+---
+
+## 十、Web UI 前端架构
+
+### 10.1 技术栈
+
+React 18 单页应用，通过 CDN 加载（React、ReactDOM、Babel），无构建步骤。所有 `.jsx` 文件由 Babel Standalone 在浏览器端编译。FastAPI 的 `StaticFiles` 中间件直接服务 `frontend/` 目录。
+
+### 10.2 双模式架构
+
+顶层 `mode` 状态（`"landing"` | `"full"` | `"quick"`）驱动三种独立视图：
+
+```text
+Landing (加载 compose)
+    ├── 选择 "Full Workflow" → FullWorkflowView
+    │     3 步 Stepper: Metadata → Preview → Export
+    │     步骤切换有 slideX 动画
+    │     step 0 Back 返回 Landing
+    │
+    └── 选择 "Quick Edit" → QuickEditView
+          单页: QuickUpdateCard + ExportCard
+          卡片有交错入场动画
+```
+
+### 10.3 前端目录结构
+
+```text
+frontend/
+├── index.html                      # 入口
+├── styles.css                      # 全局样式 + CSS 动画系统
+├── app.jsx                         # 主应用（mode 状态、reducer、业务逻辑）
+├── components/
+│   ├── utils.jsx                   # 工具函数（cx, uid, api 等）
+│   ├── Button.jsx                  # 按钮组件
+│   ├── Card.jsx                    # 卡片组件
+│   ├── Form.jsx                    # 表单组件（Field, Input, Select, Textarea, Checkbox）
+│   ├── Tabs.jsx                    # 标签页组件
+│   ├── Stepper.jsx                 # 步骤条（动态列数）
+│   ├── Toast.jsx                   # Toast 通知（支持退出动画）
+│   ├── CodeViewer.jsx              # 代码查看器
+│   ├── Dropzone.jsx                # 文件拖放区
+│   └── AnimatedContainer.jsx       # 通用动画包裹器
+├── steps/
+│   ├── StepLoadCompose.jsx         # 加载 compose 步骤
+│   ├── StepMetadata.jsx            # 元数据配置步骤
+│   ├── StepPreview.jsx             # 预览步骤
+│   └── StepExport.jsx              # 导出步骤（含 QuickUpdateCard、ExportCard）
+└── views/
+    ├── LandingView.jsx             # Landing 模式视图
+    ├── FullWorkflowView.jsx        # Full Workflow 模式视图
+    └── QuickEditView.jsx           # Quick Edit 模式视图
+```
+
+### 10.4 CSS 动画系统
+
+所有动画使用纯 CSS 实现（零 JS 动画库依赖），通过 CSS 变量控制时长：
+
+| 动画类 | 用途 |
+|--------|------|
+| `.view-enter` | 模式切换时整个视图入场（fadeIn + translateY） |
+| `.step-forward` / `.step-backward` | Full Workflow 步骤前进/后退（slideX） |
+| `.card-animate` + `.card-delay-N` | 卡片入场交错 |
+| `.toast-enter` / `.toast--exiting` | Toast 滑入/滑出 |
+| `.modalBackdrop--animated` / `.modalPanel--animated` | 模态框 fadeIn + scaleIn |
+
+遵循 `@media (prefers-reduced-motion: reduce)` 将所有 duration 置 0。
+
+### 10.5 状态管理
+
+`app.jsx` 使用 `useReducer` 管理全局状态，关键 action：
+
+| Action | 说明 |
+|--------|------|
+| `SET_MODE` | 切换 mode（landing/full/quick），重置 wizard stepIndex |
+| `SET_STEP` | 设置 stepIndex（0-2，3 步） |
+| `SET_TOAST_EXITING` | 标记 toast 为退出中（触发退出动画） |
+| `RESET_FOR_NEW_COMPOSE` | 重置到 landing 模式 |
+| `OPEN/CLOSE_POST_LOAD_CHOOSER` | 控制工作流选择模态框 |

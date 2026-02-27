@@ -88,12 +88,31 @@ CasaOSMeta
 
 ### 前端架构
 
-React 单页应用（通过 CDN 加载，无构建步骤），位于 `frontend/`：
+React 单页应用（通过 CDN 加载，无构建步骤），位于 `frontend/`。
 
-- **`app.jsx`** — 主应用，步骤导航逻辑
-- **`steps/`** — 四步流程：`StepLoadCompose` → `StepMetadata` → `StepPreview` → `StepExport`
-- **`components/`** — 复用组件（Button, Card, Form, Tabs, Toast, CodeViewer, Dropzone, Stepper）
-- **`index.html`** — 入口，引用 `app.jsx` 和 `styles.css`
+#### 双模式架构
+
+顶层 `mode` 状态驱动三种视图：
+
+```
+mode="landing"  → LandingView（加载 compose 文件）
+mode="full"     → FullWorkflowView — 3 步 Stepper（Metadata → Preview → Export）
+mode="quick"    → QuickEditView — 单页快速编辑（QuickUpdate + Export，无 Stepper）
+```
+
+加载 compose 后弹出模态框让用户选择 Full Workflow 或 Quick Edit。
+
+#### 目录结构
+
+- **`app.jsx`** — 主应用，mode 状态管理、reducer、全局业务逻辑
+- **`views/`** — 三种模式视图：
+  - `LandingView.jsx` — 包裹 StepLoadCompose，landing 模式
+  - `FullWorkflowView.jsx` — 3 步 Stepper + AnimatedContainer 步骤切换动画
+  - `QuickEditView.jsx` — QuickUpdateCard + ExportCard 交错入场
+- **`steps/`** — 步骤组件：`StepLoadCompose`、`StepMetadata`、`StepPreview`、`StepExport`（含拆分出的 `QuickUpdateCard` 和 `ExportCard`）
+- **`components/`** — 复用组件（Button, Card, Form, Tabs, Toast, CodeViewer, Dropzone, Stepper, AnimatedContainer）
+- **`styles.css`** — 样式 + CSS 动画系统（viewEnter、stepForward/Backward、cardEnter、toast 进出、modal 动画、skeleton 加载）
+- **`index.html`** — 入口，引用所有脚本
 
 ## 关键约定
 

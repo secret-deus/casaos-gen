@@ -23,6 +23,24 @@
   --font: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
     monospace;
+
+  /* Animation durations & easings */
+  --duration-fast: 150ms;
+  --duration-normal: 250ms;
+  --duration-slow: 400ms;
+  --duration-page: 350ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-normal: 0ms;
+    --duration-slow: 0ms;
+    --duration-page: 0ms;
+  }
 }
 
 *,
@@ -811,4 +829,223 @@ body {
   .stepper {
     grid-template-columns: 1fr;
   }
+}
+
+/* ─── Animation keyframes ─── */
+
+@keyframes viewEnter {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes stepForward {
+  from {
+    opacity: 0;
+    transform: translateX(40px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes stepBackward {
+  from {
+    opacity: 0;
+    transform: translateX(-40px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes cardEnter {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes toastEnter {
+  from {
+    opacity: 0;
+    transform: translateX(60px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes toastExit {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(60px);
+  }
+}
+
+@keyframes backdropFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes modalScaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* ─── Animation utility classes ─── */
+
+.view-enter {
+  animation: viewEnter var(--duration-page) var(--ease-out) both;
+}
+
+.step-forward {
+  animation: stepForward var(--duration-page) var(--ease-out) both;
+}
+
+.step-backward {
+  animation: stepBackward var(--duration-page) var(--ease-out) both;
+}
+
+.card-animate {
+  animation: cardEnter var(--duration-slow) var(--ease-out) both;
+}
+.card-delay-1 { animation-delay: 60ms; }
+.card-delay-2 { animation-delay: 140ms; }
+.card-delay-3 { animation-delay: 220ms; }
+
+.toast-enter {
+  animation: toastEnter var(--duration-normal) var(--ease-out) both;
+}
+
+.toast--exiting {
+  animation: toastExit var(--duration-normal) var(--ease-in-out) both;
+}
+
+.modalBackdrop--animated {
+  animation: backdropFadeIn var(--duration-normal) var(--ease-in-out) both;
+}
+
+.modalPanel--animated {
+  animation: modalScaleIn var(--duration-page) var(--ease-spring) both;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, #e5e7eb 25%, #f3f4f6 50%, #e5e7eb 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: var(--radius-input);
+}
+
+.skeleton-text {
+  height: 14px;
+  border-radius: 4px;
+}
+
+/* ─── Enhanced existing elements ─── */
+
+.btn {
+  transition: transform 0.08s ease, background var(--duration-fast) ease,
+    border-color var(--duration-fast) ease, opacity var(--duration-fast) ease,
+    box-shadow var(--duration-fast) ease;
+}
+
+.btn:hover:not(:disabled) {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.btn:active:not(:disabled) {
+  box-shadow: none;
+}
+
+.stepper__step {
+  transition: border-color var(--duration-fast) ease,
+    background var(--duration-fast) ease,
+    box-shadow var(--duration-normal) ease,
+    transform 0.08s ease;
+}
+
+.stepper__step--active {
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.stepper__marker {
+  transition: transform var(--duration-fast) var(--ease-spring),
+    background var(--duration-fast) ease,
+    color var(--duration-fast) ease;
+}
+
+.stepper__step--active .stepper__marker {
+  transform: scale(1.08);
+}
+
+/* ─── Back to landing link ─── */
+
+.backLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 4px 8px;
+  border-radius: var(--radius-btn);
+  transition: color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+
+.backLink:hover {
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.04);
+}
+
+/* ─── Quick Edit view layout ─── */
+
+.quickEditView {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.quickEditView__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.quickEditView__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }

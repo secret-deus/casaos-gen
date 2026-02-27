@@ -148,18 +148,33 @@ Deprecated endpoints (kept for backward compatibility):
 
 ## Web UI / 图形界面
 
-Run `uv run casaos-gen-web` (or `python -m casaos_gen.webui`) to start a local FastAPI server with a React-based card UI for uploading compose files, configuring LLM endpoints, editing metadata, and exporting the Stage 2 YAML.  
+Run `uv run casaos-gen-web` (or `python -m casaos_gen.webui`) to start a local FastAPI server with a React-based card UI for uploading compose files, configuring LLM endpoints, editing metadata, and exporting the Stage 2 YAML.
 运行 `uv run casaos-gen-web`（或 `python -m casaos_gen.webui`）即可启动 React 卡片式 FastAPI WebUI，可上传 compose、配置 LLM、在线修改字段并导出 Stage 2 结果。
 
-- Upload + LLM config: choose `.yml/.yaml`, decide whether to run Stage 1, and supply custom LLM Base URL/API Key/Model/Temperature.  
+### Dual-mode workflow / 双模式工作流
+
+After uploading a compose file, a modal dialog lets you choose between two independent UI modes:
+上传 compose 文件后，模态框让你选择两种独立的 UI 模式：
+
+- **Full Workflow** — 3-step wizard (Metadata → Preview → Export) with a stepper and animated step transitions. Best for new compose files that need LLM-generated metadata.
+  **完整工作流** — 三步向导（Metadata → Preview → Export），带步骤条和滑动切换动画。适合需要 LLM 生成元数据的新 compose 文件。
+- **Quick Edit** — Single-page view with Quick Update card + Export card. Patch a single field (auto-translated to all locales via LLM) and export immediately. Best for existing CasaOS YAML that only needs minor updates.
+  **快速编辑** — 单页视图，Quick Update 卡片 + Export 卡片。修改单个字段（LLM 自动翻译到全部语言）后立即导出。适合只需微调的已有 CasaOS YAML。
+
+You can switch modes at any time via the “Load new file” link in the header.
+随时可通过顶栏的”Load new file”链接切换模式。
+
+### Core features / 核心功能
+
+- Upload + LLM config: choose `.yml/.yaml`, decide whether to run Stage 1, and supply custom LLM Base URL/API Key/Model/Temperature.
   上传 compose 时可同时配置 LLM Base URL、API Key、模型、温度，并选择是否执行 Stage 1。
-- Stage 1 editing: specify `app.title`, `service:NAME:env:KEY`, etc., with an option to propagate short text to every language via the translation table.  
-  通过 `app` 或 `service` 目标字段修改描述，并可勾选“同步全部语言”，自动写入翻译表。
-- Stage 2 editing: enter targets like `service:web:port:8080`; the provided text is replicated to **all** locales so you only edit once. Existing CasaOS YAML uploads are preserved and only the chosen field updates.  
-  Stage 2 部分现在拆成 **单语言** 和 **多语言** 两个卡片：`app.category`/`service:web:index` 等在单语言卡片里编辑；`app.title`、`app.tips.before_install`、`service:web:port:8080` 等多语言字段在另一个卡片一次输入即可自动同步到全部语言。
-- Export YAML: trigger Stage 2 to generate CasaOS YAML directly in the UI textarea.  
-  在界面中点击导出即可生成 CasaOS YAML 并复制。
-- AppStore format: the WebUI export always normalizes service `ports`/`volumes` into the AppStore-friendly long/bind syntax.  
+- Metadata editing: specify `app.title`, `service:NAME:env:KEY`, etc., with multi-language auto-translation via LLM.
+  通过目标字段修改描述，多语言字段通过 LLM 自动翻译到全部语言。
+- Export YAML: generate and download/copy the final CasaOS compose YAML.
+  在界面中导出、下载或复制 CasaOS YAML。
+- AppStore format: the WebUI export always normalizes service `ports`/`volumes` into the AppStore-friendly long/bind syntax.
   AppStore 输出：WebUI 导出结果默认会将服务的 `ports`/`volumes` 规范化为 AppStore 常用的 long/bind 写法。
-- WebUI LLM settings persist under `llm_config.json` so you don’t have to re-enter Base URL/API key each session.  
-  前端现已提供保存按钮，输入 Base URL / API Key / Model / Temperature 后点击 “Save LLM Settings” 即可写入 `llm_config.json`，以后默认自动加载。
+- WebUI LLM settings persist under `llm_config.json` so you don’t have to re-enter Base URL/API key each session.
+  LLM 配置持久化在 `llm_config.json`，无需每次重新输入。
+- CSS animations: smooth page/step transitions, card stagger animations, toast enter/exit, modal backdrop/scale effects. All animations respect `prefers-reduced-motion`.
+  CSS 动画系统：页面/步骤切换动画、卡片交错入场、Toast 进出动画、模态框动效。所有动画遵循 `prefers-reduced-motion`。

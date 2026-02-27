@@ -90,9 +90,8 @@
     return { kind: "unknown" };
   }
 
-  function StepExport({ engine, renderedYaml, onRefresh, onQuickUpdate, busy }) {
-    const hasStage2 = Boolean(engine?.has_stage2);
-
+  /* ─── QuickUpdateCard ─── */
+  function QuickUpdateCard({ engine, onQuickUpdate, busy }) {
     const { useEffect, useState } = React;
     const [presetId, setPresetId] = useState("app.description|multi");
     const [targetDraft, setTargetDraft] = useState("app.description");
@@ -133,9 +132,7 @@
 
         for (const entry of ports) {
           const container = String(entry?.container ?? "");
-          if (!container) {
-            continue;
-          }
+          if (!container) continue;
           out.push({
             id: `service:${serviceName}:port:${container}|multi`,
             label: `service:${serviceName}:port:${container}`,
@@ -145,9 +142,7 @@
         }
         for (const entry of envs) {
           const container = String(entry?.container ?? "");
-          if (!container) {
-            continue;
-          }
+          if (!container) continue;
           out.push({
             id: `service:${serviceName}:env:${container}|multi`,
             label: `service:${serviceName}:env:${container}`,
@@ -157,9 +152,7 @@
         }
         for (const entry of volumes) {
           const container = String(entry?.container ?? "");
-          if (!container) {
-            continue;
-          }
+          if (!container) continue;
           out.push({
             id: `service:${serviceName}:volume:${container}|multi`,
             label: `service:${serviceName}:volume:${container}`,
@@ -184,262 +177,247 @@
     const effectiveMultilang = multilangLocked ? lockedMultilang : Boolean(multilang);
 
     useEffect(() => {
-      if (!multilangLocked) {
-        return;
-      }
+      if (!multilangLocked) return;
       setMultilang(lockedMultilang);
     }, [multilangLocked, lockedMultilang]);
 
     useEffect(() => {
-      if (isDirtyValue) {
-        return;
-      }
+      if (isDirtyValue) return;
       setValueDraft(activeMetaValue);
     }, [activeMetaValue, isDirtyValue]);
 
     const languageOptions = Array.isArray(engine?.languages) ? engine.languages : [];
     useEffect(() => {
-      if (!effectiveMultilang) {
-        return;
-      }
-      if (!languageOptions.length) {
-        return;
-      }
+      if (!effectiveMultilang) return;
+      if (!languageOptions.length) return;
       setLanguageDraft((current) => {
         const currentValue = String(current || "").trim();
-        if (!currentValue) {
-          return "";
-        }
-        if (currentValue && languageOptions.includes(currentValue)) {
-          return currentValue;
-        }
-        if (languageOptions.includes("zh_CN")) {
-          return "zh_CN";
-        }
-        if (languageOptions.includes("en_US")) {
-          return "en_US";
-        }
+        if (!currentValue) return "";
+        if (currentValue && languageOptions.includes(currentValue)) return currentValue;
+        if (languageOptions.includes("zh_CN")) return "zh_CN";
+        if (languageOptions.includes("en_US")) return "en_US";
         return languageOptions[0];
       });
     }, [effectiveMultilang, engine?.languages]);
 
     return (
-      <div className="step">
-        <div className="stack stack--lg">
-          <Card>
-            <CardHeader
-              title="Quick update"
-              subtitle="Patch a single field without re-running the full pipeline. Multi-language fields auto-translate via LLM on Apply."
-              actions={
-                <Button
-                  variant="primary"
-                  size="md"
-                  loading={busy?.patchingField}
-                  disabled={!canPatch || !String(targetDraft || "").trim()}
-                  onClick={async () => {
-                    const ok = await onQuickUpdate?.({
-                      target: targetDraft,
-                      value: valueDraft,
-                      multilang: effectiveMultilang,
-                      language: languageDraft,
-                    });
-                    if (ok) {
-                      setIsDirtyValue(false);
-                      setIsDirtyTarget(false);
-                    }
+      <Card>
+        <CardHeader
+          title="Quick update"
+          subtitle="Patch a single field without re-running the full pipeline. Multi-language fields auto-translate via LLM on Apply."
+          actions={
+            <Button
+              variant="primary"
+              size="md"
+              loading={busy?.patchingField}
+              disabled={!canPatch || !String(targetDraft || "").trim()}
+              onClick={async () => {
+                const ok = await onQuickUpdate?.({
+                  target: targetDraft,
+                  value: valueDraft,
+                  multilang: effectiveMultilang,
+                  language: languageDraft,
+                });
+                if (ok) {
+                  setIsDirtyValue(false);
+                  setIsDirtyTarget(false);
+                }
+              }}
+            >
+              Apply
+            </Button>
+          }
+        />
+        <CardBody>
+          <div className="stack stack--md">
+            <div className="grid2">
+              <Field id="quick-preset" label="Preset">
+                <Select
+                  id="quick-preset"
+                  value={presetId}
+                  disabled={!canPatch}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setPresetId(next);
+                    const allPresets = [...appPresetsMulti, ...appPresetsSingle, ...servicePresets];
+                    const match = allPresets.find((item) => item.id === next);
+                    if (!match) return;
+                    setTargetDraft(match.target);
+                    setMultilang(Boolean(match.multilang));
+                    setIsDirtyTarget(false);
+                    setValueDraft(resolveMetaValue(engine, match.target));
+                    setIsDirtyValue(false);
                   }}
                 >
-                  Apply
-                </Button>
-              }
-            />
-            <CardBody>
-              <div className="stack stack--md">
-                <div className="grid2">
-                  <Field id="quick-preset" label="Preset">
-                    <Select
-                      id="quick-preset"
-                      value={presetId}
-                      disabled={!canPatch}
-                      onChange={(event) => {
-                        const next = event.target.value;
-                        setPresetId(next);
-
-                        const allPresets = [...appPresetsMulti, ...appPresetsSingle, ...servicePresets];
-                        const match = allPresets.find((item) => item.id === next);
-                        if (!match) {
-                          return;
-                        }
-                        setTargetDraft(match.target);
-                        setMultilang(Boolean(match.multilang));
-                        setIsDirtyTarget(false);
-                        setValueDraft(resolveMetaValue(engine, match.target));
-                        setIsDirtyValue(false);
-                      }}
-                    >
-                      <optgroup label="App (multi-language)">
-                        {appPresetsMulti.map((preset) => (
-                          <option key={preset.id} value={preset.id}>
-                            {preset.label}
-                          </option>
-                        ))}
-                      </optgroup>
-                      <optgroup label="App (single-language)">
-                        {appPresetsSingle.map((preset) => (
-                          <option key={preset.id} value={preset.id}>
-                            {preset.label}
-                          </option>
-                        ))}
-                      </optgroup>
-                      <optgroup label="Services (multi-language descriptions)">
-                        {servicePresets.length ? (
-                          servicePresets.map((preset) => (
-                            <option key={preset.id} value={preset.id}>
-                              {preset.label}
-                            </option>
-                          ))
-                        ) : (
-                          <option value="__no_services__" disabled>
-                            (no services detected)
-                          </option>
-                        )}
-                      </optgroup>
-                    </Select>
-                  </Field>
-
-                  <div className="stack stack--md">
-                    {multilangLocked ? (
-                      <div className="muted">
-                        {effectiveMultilang ? "Field type: multi-language" : "Field type: single-language"}
-                      </div>
+                  <optgroup label="App (multi-language)">
+                    {appPresetsMulti.map((preset) => (
+                      <option key={preset.id} value={preset.id}>{preset.label}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="App (single-language)">
+                    {appPresetsSingle.map((preset) => (
+                      <option key={preset.id} value={preset.id}>{preset.label}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Services (multi-language descriptions)">
+                    {servicePresets.length ? (
+                      servicePresets.map((preset) => (
+                        <option key={preset.id} value={preset.id}>{preset.label}</option>
+                      ))
                     ) : (
-                      <Checkbox
-                        id="quick-multilang"
-                        label="Multi-language field"
-                        hint="When enabled, edits write into x-casaos locale dictionaries."
-                        checked={effectiveMultilang}
-                        disabled={!canPatch}
-                        onChange={(checked) => setMultilang(Boolean(checked))}
-                      />
+                      <option value="__no_services__" disabled>(no services detected)</option>
                     )}
+                  </optgroup>
+                </Select>
+              </Field>
 
-                    {effectiveMultilang && (
-                      <>
-                        <Field
-                          id="quick-language"
-                          label="Input language (optional)"
-                          hint="Leave as auto to detect from your text. Set it only if detection is wrong."
-                        >
-                          <Select
-                            id="quick-language"
-                            value={languageDraft}
-                            disabled={!canPatch || !languageOptions.length}
-                            onChange={(event) => setLanguageDraft(event.target.value)}
-                          >
-                            <option value="">auto</option>
-                            {languageOptions.length ? (
-                              languageOptions.map((lang) => (
-                                <option key={lang} value={lang}>
-                                  {lang}
-                                </option>
-                              ))
-                            ) : (
-                              <option value="" disabled>
-                                (no languages)
-                              </option>
-                            )}
-                          </Select>
-                        </Field>
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                <Field
-                  id="quick-target"
-                  label="Target"
-                  hint="Examples: app.description, app.tips.before_install, service:web:port:80, service:web:env:TZ"
-                >
-                  <Input
-                    id="quick-target"
-                    value={targetDraft}
-                    onChange={(event) => {
-                      setTargetDraft(event.target.value);
-                      setIsDirtyTarget(true);
-                    }}
-                    placeholder="app.description"
-                    disabled={!canPatch}
-                  />
-                </Field>
-
-                <Field id="quick-value" label="Value" hint={activeMetaValue ? "Prefilled from the loaded file/server metadata." : ""}>
-                  <Textarea
-                    id="quick-value"
-                    value={valueDraft}
-                    onChange={(event) => {
-                      setValueDraft(event.target.value);
-                      setIsDirtyValue(true);
-                    }}
-                    rows={6}
-                    spellCheck={false}
-                    disabled={!canPatch}
-                  />
-                </Field>
-
-                <div className="inlineNotice">
-                  {effectiveMultilang
-                    ? "Multi-language mode uses the LLM to translate and fill all locales automatically."
-                    : "Single-language mode updates the raw field value."}{" "}
-                  Export will generate <code>x-casaos</code> automatically if missing (no LLM required).
-                </div>
-              </div>
-            </CardBody>
-          </Card>
-
-          <Card>
-            <CardHeader
-              title="Export"
-              subtitle="Copy or download the final CasaOS compose YAML."
-              actions={
-                <div className="row row--end">
-                  <Button
-                    variant="secondary"
-                    size="md"
-                    loading={busy?.exporting}
-                    disabled={!canExport}
-                    onClick={() => onRefresh?.()}
-                  >
-                    Refresh YAML
-                  </Button>
-                </div>
-              }
-            />
-            <CardBody>
-              <div className="stack stack--lg">
-                {hasStage2 ? (
-                  <div className="banner banner--success">
-                    <div className="banner__title">Rendered successfully</div>
-                    <div className="banner__message">
-                      YAML below is exported in AppStore-friendly format (ports long syntax + bind volumes).
-                    </div>
+              <div className="stack stack--md">
+                {multilangLocked ? (
+                  <div className="muted">
+                    {effectiveMultilang ? "Field type: multi-language" : "Field type: single-language"}
                   </div>
                 ) : (
-                  <div className="banner banner--warning">
-                    <div className="banner__title">Not exported yet</div>
-                    <div className="banner__message">
-                      Click Refresh YAML to generate multi-language <code>x-casaos</code> output (no LLM required).
-                    </div>
-                  </div>
+                  <Checkbox
+                    id="quick-multilang"
+                    label="Multi-language field"
+                    hint="When enabled, edits write into x-casaos locale dictionaries."
+                    checked={effectiveMultilang}
+                    disabled={!canPatch}
+                    onChange={(checked) => setMultilang(Boolean(checked))}
+                  />
                 )}
 
-                <CodeViewer value={renderedYaml} placeholder="Exported YAML will appear here." maxHeight={520} />
+                {effectiveMultilang && (
+                  <Field
+                    id="quick-language"
+                    label="Input language (optional)"
+                    hint="Leave as auto to detect from your text. Set it only if detection is wrong."
+                  >
+                    <Select
+                      id="quick-language"
+                      value={languageDraft}
+                      disabled={!canPatch || !languageOptions.length}
+                      onChange={(event) => setLanguageDraft(event.target.value)}
+                    >
+                      <option value="">auto</option>
+                      {languageOptions.length ? (
+                        languageOptions.map((lang) => (
+                          <option key={lang} value={lang}>{lang}</option>
+                        ))
+                      ) : (
+                        <option value="" disabled>(no languages)</option>
+                      )}
+                    </Select>
+                  </Field>
+                )}
               </div>
-            </CardBody>
-          </Card>
+            </div>
+
+            <Field
+              id="quick-target"
+              label="Target"
+              hint="Examples: app.description, app.tips.before_install, service:web:port:80, service:web:env:TZ"
+            >
+              <Input
+                id="quick-target"
+                value={targetDraft}
+                onChange={(event) => {
+                  setTargetDraft(event.target.value);
+                  setIsDirtyTarget(true);
+                }}
+                placeholder="app.description"
+                disabled={!canPatch}
+              />
+            </Field>
+
+            <Field id="quick-value" label="Value" hint={activeMetaValue ? "Prefilled from the loaded file/server metadata." : ""}>
+              <Textarea
+                id="quick-value"
+                value={valueDraft}
+                onChange={(event) => {
+                  setValueDraft(event.target.value);
+                  setIsDirtyValue(true);
+                }}
+                rows={6}
+                spellCheck={false}
+                disabled={!canPatch}
+              />
+            </Field>
+
+            <div className="inlineNotice">
+              {effectiveMultilang
+                ? "Multi-language mode uses the LLM to translate and fill all locales automatically."
+                : "Single-language mode updates the raw field value."}{" "}
+              Export will generate <code>x-casaos</code> automatically if missing (no LLM required).
+            </div>
+          </div>
+        </CardBody>
+      </Card>
+    );
+  }
+
+  /* ─── ExportCard ─── */
+  function ExportCard({ engine, renderedYaml, onRefresh, busy }) {
+    const hasStage2 = Boolean(engine?.has_stage2);
+    const canExport = Boolean(engine?.has_compose && (engine?.has_meta || engine?.has_stage2));
+
+    return (
+      <Card>
+        <CardHeader
+          title="Export"
+          subtitle="Copy or download the final CasaOS compose YAML."
+          actions={
+            <div className="row row--end">
+              <Button
+                variant="secondary"
+                size="md"
+                loading={busy?.exporting}
+                disabled={!canExport}
+                onClick={() => onRefresh?.()}
+              >
+                Refresh YAML
+              </Button>
+            </div>
+          }
+        />
+        <CardBody>
+          <div className="stack stack--lg">
+            {hasStage2 ? (
+              <div className="banner banner--success">
+                <div className="banner__title">Rendered successfully</div>
+                <div className="banner__message">
+                  YAML below is exported in AppStore-friendly format (ports long syntax + bind volumes).
+                </div>
+              </div>
+            ) : (
+              <div className="banner banner--warning">
+                <div className="banner__title">Not exported yet</div>
+                <div className="banner__message">
+                  Click Refresh YAML to generate multi-language <code>x-casaos</code> output (no LLM required).
+                </div>
+              </div>
+            )}
+
+            <CodeViewer value={renderedYaml} placeholder="Exported YAML will appear here." maxHeight={520} />
+          </div>
+        </CardBody>
+      </Card>
+    );
+  }
+
+  /* ─── StepExport (combined, backward-compatible) ─── */
+  function StepExport({ engine, renderedYaml, onRefresh, onQuickUpdate, busy }) {
+    return (
+      <div className="step">
+        <div className="stack stack--lg">
+          <QuickUpdateCard engine={engine} onQuickUpdate={onQuickUpdate} busy={busy} />
+          <ExportCard engine={engine} renderedYaml={renderedYaml} onRefresh={onRefresh} busy={busy} />
         </div>
       </div>
     );
   }
 
+  root.steps.QuickUpdateCard = QuickUpdateCard;
+  root.steps.ExportCard = ExportCard;
   root.steps.StepExport = StepExport;
 })();

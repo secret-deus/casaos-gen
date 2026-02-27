@@ -12,8 +12,10 @@
     className,
     ariaLabel = "Wizard steps",
   }) {
+    const stepperStyle = { gridTemplateColumns: `repeat(${steps.length}, 1fr)` };
+
     return (
-      <nav className={cx("stepper", className)} aria-label={ariaLabel}>
+      <nav className={cx("stepper", className)} style={stepperStyle} aria-label={ariaLabel}>
         {steps.map((step, index) => {
           const isActive = index === activeIndex;
           const isEnabled = index <= maxEnabledIndex;

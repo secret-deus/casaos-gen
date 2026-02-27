@@ -7,13 +7,20 @@
       rootNS.api &&
       rootNS.components &&
       rootNS.steps &&
+      rootNS.views &&
       rootNS.components.Button &&
       rootNS.components.Stepper &&
       rootNS.components.ToastHost &&
+      rootNS.components.AnimatedContainer &&
       rootNS.steps.StepLoadCompose &&
       rootNS.steps.StepMetadata &&
       rootNS.steps.StepPreview &&
-      rootNS.steps.StepExport;
+      rootNS.steps.StepExport &&
+      rootNS.steps.QuickUpdateCard &&
+      rootNS.steps.ExportCard &&
+      rootNS.views.LandingView &&
+      rootNS.views.FullWorkflowView &&
+      rootNS.views.QuickEditView;
 
     if (!hasDeps) {
       window.setTimeout(bootstrap, 20);
@@ -23,19 +30,15 @@
     const { useEffect, useMemo, useReducer, useRef } = React;
     const { requestJSON, requestText } = rootNS.api;
     const { cx, uid, readFileAsText, copyToClipboard, clamp } = rootNS.utils;
-    const { Button, IconButton, Stepper, ToastHost, Card, CardHeader, CardBody } = rootNS.components;
-    const { StepLoadCompose, StepMetadata, StepPreview, StepExport } = rootNS.steps;
+    const { Button, IconButton, ToastHost, Card, CardHeader, CardBody } = rootNS.components;
+    const { LandingView, FullWorkflowView, QuickEditView } = rootNS.views;
 
-    const STEPS = [
-      { key: "load", label: "Load Compose" },
-      { key: "metadata", label: "Metadata" },
-      { key: "preview", label: "Preview" },
-      { key: "export", label: "Export" },
-    ];
+    const TOAST_EXIT_MS = 250;
 
     const initialState = {
+      mode: "landing", // "landing" | "full" | "quick"
       wizard: {
-        stepIndex: 0,
+        stepIndex: 0, // 0-2 (3 steps: Metadata/Preview/Export)
         unlockedIndex: 0,
       },
       compose: {
@@ -104,13 +107,22 @@
 
     function reducer(state, action) {
       switch (action.type) {
+        case "SET_MODE": {
+          return {
+            ...state,
+            mode: action.mode,
+            wizard: { ...state.wizard, stepIndex: 0 },
+            dialogs: { ...state.dialogs, postLoadChooserOpen: false },
+          };
+        }
         case "SET_STEP": {
-          return { ...state, wizard: { ...state.wizard, stepIndex: action.stepIndex } };
+          const clamped = Math.max(0, Math.min(2, action.stepIndex));
+          return { ...state, wizard: { ...state.wizard, stepIndex: clamped } };
         }
         case "UNLOCK_STEP": {
           return {
             ...state,
-            wizard: { ...state.wizard, unlockedIndex: Math.max(state.wizard.unlockedIndex, action.index) },
+            wizard: { ...state.wizard, unlockedIndex: Math.max(state.wizard.unlockedIndex, Math.min(2, action.index)) },
           };
         }
         case "SET_COMPOSE_MODE": {
@@ -134,10 +146,7 @@
             params: {
               ...state.params,
               dirty: true,
-              draft: {
-                ...state.params.draft,
-                [action.field]: action.value,
-              },
+              draft: { ...state.params.draft, [action.field]: action.value },
             },
           };
         }
@@ -147,10 +156,7 @@
             llm: {
               ...state.llm,
               dirty: true,
-              draft: {
-                ...state.llm.draft,
-                [action.field]: action.value,
-              },
+              draft: { ...state.llm.draft, [action.field]: action.value },
             },
           };
         }
@@ -166,9 +172,9 @@
           if (!nextEngine.has_compose) {
             nextUnlocked = 0;
           } else if (nextEngine.has_stage2) {
-            nextUnlocked = Math.max(nextUnlocked, 3);
+            nextUnlocked = Math.max(nextUnlocked, 2);
           } else {
-            nextUnlocked = Math.max(nextUnlocked, 1);
+            nextUnlocked = Math.max(nextUnlocked, 0);
           }
 
           const nextState = {
@@ -220,22 +226,23 @@
         case "PUSH_TOAST": {
           return { ...state, toasts: [...state.toasts, action.toast] };
         }
+        case "SET_TOAST_EXITING": {
+          return {
+            ...state,
+            toasts: state.toasts.map((t) => (t.id === action.id ? { ...t, exiting: true } : t)),
+          };
+        }
         case "DISMISS_TOAST": {
           return { ...state, toasts: state.toasts.filter((item) => item.id !== action.id) };
         }
         case "RESET_FOR_NEW_COMPOSE": {
-          const requestedStepIndex = typeof action.stepIndex === "number" ? action.stepIndex : 1;
-          const requestedUnlockedIndex =
-            typeof action.unlockedIndex === "number" ? action.unlockedIndex : requestedStepIndex;
-
-          const safeStepIndex = Math.max(0, Math.min(3, requestedStepIndex));
-          const safeUnlockedIndex = Math.max(safeStepIndex, Math.max(0, Math.min(3, requestedUnlockedIndex)));
           return {
             ...state,
+            mode: "landing",
             preview: { tab: "compose" },
             renderedYaml: "",
             dialogs: { ...state.dialogs, postLoadChooserOpen: false },
-            wizard: { stepIndex: safeStepIndex, unlockedIndex: safeUnlockedIndex },
+            wizard: { stepIndex: 0, unlockedIndex: 0 },
           };
         }
         case "OPEN_POST_LOAD_CHOOSER": {
@@ -261,15 +268,6 @@
       const firstSyncRef = useRef(true);
       const toastTimersRef = useRef(new Map());
 
-      const engineMaxIndex = useMemo(() => {
-        if (!state.engine.has_compose) {
-          return 0;
-        }
-        return 3;
-      }, [state.engine.has_compose, state.engine.has_stage2]);
-
-      const maxEnabledIndex = Math.min(engineMaxIndex, state.wizard.unlockedIndex);
-
       const pushToast = (toast) => {
         const id = toast.id || uid("toast");
         dispatch({
@@ -279,6 +277,7 @@
             title: toast.title || "",
             message: toast.message || "",
             variant: toast.variant || "info",
+            exiting: false,
           },
         });
         const duration = clamp(toast.duration ?? 4500, 1500, 15000);
@@ -288,19 +287,26 @@
         toastTimersRef.current.set(
           id,
           window.setTimeout(() => {
-            dispatch({ type: "DISMISS_TOAST", id });
-            toastTimersRef.current.delete(id);
+            dismissToast(id);
           }, duration)
         );
       };
 
       const dismissToast = (id) => {
-        dispatch({ type: "DISMISS_TOAST", id });
+        // Start exit animation
+        dispatch({ type: "SET_TOAST_EXITING", id });
         const timer = toastTimersRef.current.get(id);
         if (timer) {
           window.clearTimeout(timer);
-          toastTimersRef.current.delete(id);
         }
+        // After exit animation completes, remove from DOM
+        toastTimersRef.current.set(
+          id,
+          window.setTimeout(() => {
+            dispatch({ type: "DISMISS_TOAST", id });
+            toastTimersRef.current.delete(id);
+          }, TOAST_EXIT_MS)
+        );
       };
 
       const syncUIState = async ({ silent = false } = {}) => {
@@ -326,51 +332,43 @@
         syncUIState({ silent: true });
       }, []);
 
+      // First sync: auto-detect mode
       useEffect(() => {
-        // Keep UI in sync even if server state changes outside the current step.
-        syncUIState({ silent: true });
-      }, [state.wizard.stepIndex]);
-
-      useEffect(() => {
-        if (!firstSyncRef.current) {
-          return;
-        }
-        if (state.engine.lastSyncedAt == null) {
-          return;
-        }
+        if (!firstSyncRef.current) return;
+        if (state.engine.lastSyncedAt == null) return;
         firstSyncRef.current = false;
 
         if (state.engine.has_stage2) {
-          dispatch({ type: "UNLOCK_STEP", index: 3 });
-          dispatch({ type: "SET_STEP", stepIndex: 3 });
+          dispatch({ type: "SET_MODE", mode: "quick" });
           return;
         }
         if (state.engine.has_compose) {
-          dispatch({ type: "UNLOCK_STEP", index: 1 });
-          dispatch({ type: "SET_STEP", stepIndex: 1 });
+          dispatch({ type: "OPEN_POST_LOAD_CHOOSER", hasStage2: false });
         }
       }, [state.engine.has_compose, state.engine.has_stage2, state.engine.lastSyncedAt]);
 
+      // Auto-refresh export when entering export step in full mode
       useEffect(() => {
-        if (!state.engine.has_compose && state.wizard.stepIndex !== 0) {
-          dispatch({ type: "SET_STEP", stepIndex: 0 });
-        }
-        if (state.wizard.stepIndex > maxEnabledIndex) {
-          dispatch({ type: "SET_STEP", stepIndex: maxEnabledIndex });
-        }
-      }, [state.engine.has_compose, maxEnabledIndex, state.wizard.stepIndex]);
-
-      useEffect(() => {
+        if (state.mode !== "full") return;
         const canExport = state.engine.has_compose && (state.engine.has_meta || state.engine.has_stage2);
         if (
-          state.wizard.stepIndex === 3 &&
+          state.wizard.stepIndex === 2 &&
           canExport &&
           !state.busy.exporting &&
           !String(state.renderedYaml || "").trim()
         ) {
           refreshExportYaml();
         }
-      }, [state.wizard.stepIndex, state.engine.has_compose, state.engine.has_meta, state.engine.has_stage2]);
+      }, [state.mode, state.wizard.stepIndex, state.engine.has_compose, state.engine.has_meta, state.engine.has_stage2]);
+
+      // Auto-refresh export when entering quick mode
+      useEffect(() => {
+        if (state.mode !== "quick") return;
+        const canExport = state.engine.has_compose && (state.engine.has_meta || state.engine.has_stage2);
+        if (canExport && !state.busy.exporting && !String(state.renderedYaml || "").trim()) {
+          refreshExportYaml();
+        }
+      }, [state.mode]);
 
       useEffect(
         () => () => {
@@ -413,11 +411,7 @@
           await requestJSON("/api/compose", { method: "POST", body: formData });
           firstSyncRef.current = false;
           const data = await syncUIState({ silent: true });
-          dispatch({
-            type: "RESET_FOR_NEW_COMPOSE",
-            stepIndex: 1,
-            unlockedIndex: 3,
-          });
+          dispatch({ type: "RESET_FOR_NEW_COMPOSE" });
           dispatch({ type: "OPEN_POST_LOAD_CHOOSER", hasStage2: Boolean(data?.has_stage2) });
           pushToast({
             title: "Compose loaded",
@@ -447,11 +441,7 @@
           });
           firstSyncRef.current = false;
           const data = await syncUIState({ silent: true });
-          dispatch({
-            type: "RESET_FOR_NEW_COMPOSE",
-            stepIndex: 1,
-            unlockedIndex: 3,
-          });
+          dispatch({ type: "RESET_FOR_NEW_COMPOSE" });
           dispatch({ type: "OPEN_POST_LOAD_CHOOSER", hasStage2: Boolean(data?.has_stage2) });
           pushToast({
             title: "Compose loaded",
@@ -496,7 +486,7 @@
             dispatch({ type: "SET_PREVIEW_TAB", tab: "rendered" });
           }
           await syncUIState({ silent: true });
-          dispatch({ type: "UNLOCK_STEP", index: 3 });
+          dispatch({ type: "UNLOCK_STEP", index: 2 });
           const warnings = Array.isArray(renderResult?.warnings) ? renderResult.warnings : [];
           if (warnings.length) {
             pushToast({ title: "Rendered (degraded)", message: warnings[0], variant: "warning", duration: 5200 });
@@ -617,78 +607,38 @@
           const appFieldPath = isAppTarget ? targetValue.slice("app.".length) : "";
           const appMultilangFields = new Set(["title", "tagline", "description"]);
           const appSingleFields = new Set([
-            "category",
-            "author",
-            "developer",
-            "main",
-            "port_map",
-            "scheme",
-            "index",
-            "icon",
-            "thumbnail",
+            "category", "author", "developer", "main", "port_map", "scheme", "index", "icon", "thumbnail",
           ]);
           const isAppMultilangTarget = isAppTarget && (appMultilangFields.has(appFieldPath) || appFieldPath.startsWith("tips."));
           const isAppSingleTarget = isAppTarget && appSingleFields.has(appFieldPath);
 
           if (isAppMultilangTarget && !isMultilang) {
-            pushToast({
-              title: "Wrong mode",
-              message: "This app target is multi-language. Turn on multi-language mode.",
-              variant: "warning",
-            });
+            pushToast({ title: "Wrong mode", message: "This app target is multi-language. Turn on multi-language mode.", variant: "warning" });
             return false;
           }
           if (isAppSingleTarget && isMultilang) {
-            pushToast({
-              title: "Wrong mode",
-              message: "This app target is single-language. Turn off multi-language mode.",
-              variant: "warning",
-            });
+            pushToast({ title: "Wrong mode", message: "This app target is single-language. Turn off multi-language mode.", variant: "warning" });
             return false;
           }
-
           if (isServiceMultilangTarget && !isMultilang) {
-            pushToast({
-              title: "Wrong mode",
-              message: "This service target requires multi-language mode (env/port/volume descriptions).",
-              variant: "warning",
-            });
+            pushToast({ title: "Wrong mode", message: "This service target requires multi-language mode.", variant: "warning" });
             return false;
           }
           if (isServiceSingleTarget && isMultilang) {
-            pushToast({
-              title: "Wrong mode",
-              message: "This service target looks like a single-language path. Turn off multi-language mode.",
-              variant: "warning",
-            });
+            pushToast({ title: "Wrong mode", message: "This service target is single-language. Turn off multi-language mode.", variant: "warning" });
             return false;
           }
-
           if (!isAppTarget && !targetValue.startsWith("service:")) {
-            pushToast({
-              title: "Invalid target",
-              message: "Target must start with app. or service:.",
-              variant: "warning",
-            });
+            pushToast({ title: "Invalid target", message: "Target must start with app. or service:.", variant: "warning" });
             return false;
           }
 
           const canMetaUpdateAppFields = new Set([
-            "title",
-            "tagline",
-            "description",
-            "category",
-            "author",
-            "developer",
-            "main",
-            "port_map",
-            "scheme",
-            "index",
+            "title", "tagline", "description", "category", "author", "developer", "main", "port_map", "scheme", "index",
           ]);
           const shouldUpdateMeta =
             Boolean(state.engine.has_meta) &&
             ((isAppTarget && canMetaUpdateAppFields.has(appFieldPath)) || isServiceMultilangTarget);
-
           const shouldUpdateMetaValue = shouldUpdateMeta && !isMultilang;
 
           if (shouldUpdateMetaValue) {
@@ -772,162 +722,59 @@
         });
       };
 
+      // Navigation
+      const maxEnabledIndex = state.wizard.unlockedIndex;
+
       const canContinue = useMemo(() => {
-        if (state.wizard.stepIndex === 0) {
-          return state.engine.has_compose;
-        }
-        if (state.wizard.stepIndex === 1) {
-          return state.engine.has_compose;
-        }
-        if (state.wizard.stepIndex === 2) {
-          return state.engine.has_compose;
-        }
-        return true;
-      }, [state.engine.has_compose, state.engine.has_stage2, state.wizard.stepIndex]);
+        return state.engine.has_compose;
+      }, [state.engine.has_compose]);
 
       const onBack = () => {
-        dispatch({ type: "SET_STEP", stepIndex: Math.max(0, state.wizard.stepIndex - 1) });
+        if (state.wizard.stepIndex === 0) {
+          dispatch({ type: "SET_MODE", mode: "landing" });
+          return;
+        }
+        dispatch({ type: "SET_STEP", stepIndex: state.wizard.stepIndex - 1 });
       };
 
       const onContinue = () => {
-        const current = state.wizard.stepIndex;
-        const next = Math.min(STEPS.length - 1, current + 1);
+        const next = Math.min(2, state.wizard.stepIndex + 1);
         dispatch({ type: "UNLOCK_STEP", index: next });
         dispatch({ type: "SET_STEP", stepIndex: next });
-        if (next === 3 && state.engine.has_compose && !state.renderedYaml.trim()) {
+        if (next === 2 && state.engine.has_compose && !state.renderedYaml.trim()) {
           refreshExportYaml();
         }
       };
 
-      const postLoadHasStage2 = Boolean(state.dialogs?.postLoadHasStage2);
-      const showPostLoadChooser = Boolean(state.dialogs?.postLoadChooserOpen);
-
       const chooseFullWorkflow = () => {
-        dispatch({ type: "CLOSE_POST_LOAD_CHOOSER" });
-        dispatch({ type: "SET_STEP", stepIndex: 1 });
+        dispatch({ type: "SET_MODE", mode: "full" });
       };
 
       const chooseQuickUpdate = () => {
-        dispatch({ type: "CLOSE_POST_LOAD_CHOOSER" });
-        dispatch({ type: "SET_STEP", stepIndex: 3 });
+        dispatch({ type: "SET_MODE", mode: "quick" });
       };
 
-      const footerRight = useMemo(() => {
-        if (state.wizard.stepIndex === 3) {
-          return (
-            <div className="footer__actions">
-              <Button
-                variant="secondary"
-                disabled={!state.engine.has_compose || !state.renderedYaml.trim()}
-                onClick={downloadYaml}
-              >
-                Download
-              </Button>
-              <Button
-                variant="primary"
-                disabled={!state.engine.has_compose || !state.renderedYaml.trim()}
-                onClick={copyYaml}
-              >
-                Copy YAML
-              </Button>
-            </div>
-          );
-        }
-        return (
-          <Button
-            variant="primary"
-            disabled={!canContinue}
-            onClick={onContinue}
-          >
-            Continue
-          </Button>
-        );
-      }, [state.wizard.stepIndex, state.engine.has_compose, state.renderedYaml, canContinue]);
+      const backToLanding = () => {
+        dispatch({ type: "SET_MODE", mode: "landing" });
+      };
 
-      const mainContent = useMemo(() => {
-        switch (state.wizard.stepIndex) {
-          case 0:
-            return (
-              <StepLoadCompose
-                mode={state.compose.mode}
-                onModeChange={(mode) => dispatch({ type: "SET_COMPOSE_MODE", mode })}
-                composeText={state.compose.text}
-                composeFile={state.compose.file}
-                onComposeTextChange={(text) => dispatch({ type: "SET_COMPOSE_TEXT", text })}
-                onComposeFileChange={(file) => dispatch({ type: "SET_COMPOSE_FILE", file })}
-                onLoadFromFile={loadComposeFromFile}
-                onLoadFromText={loadComposeFromText}
-                engine={state.engine}
-                busy={state.busy.loadingCompose}
-              />
-            );
-          case 1:
-            return (
-              <StepMetadata
-                engine={state.engine}
-                useLLM={state.params.useLLM}
-                useParams={state.params.useParams}
-                autoRenderAfterSave={state.params.autoRenderAfterSave}
-                onUseLLMChange={(value) => dispatch({ type: "SET_PARAMS_MODE", key: "useLLM", value })}
-                onUseParamsChange={(value) => dispatch({ type: "SET_PARAMS_MODE", key: "useParams", value })}
-                onAutoRenderChange={(value) => dispatch({ type: "SET_PARAMS_MODE", key: "autoRenderAfterSave", value })}
-                metadataDraft={state.params.draft}
-                onMetadataFieldChange={(field, value) => dispatch({ type: "SET_PARAMS_DRAFT_FIELD", field, value })}
-                paramsFile={state.params.file}
-                onParamsFileChange={(file) => dispatch({ type: "SET_PARAMS_FILE", file })}
-                llmDraft={state.llm.draft}
-                onLLMFieldChange={(field, value) => {
-                  if (field === "temperature") {
-                    dispatch({ type: "SET_LLM_DRAFT_FIELD", field, value: clamp(value, 0, 2) });
-                    return;
-                  }
-                  dispatch({ type: "SET_LLM_DRAFT_FIELD", field, value });
-                }}
-                onSaveLLMSettings={saveLLMSettings}
-                onFillMetadata={fillMetadata}
-                busy={{
-                  fillingMeta: state.busy.fillingMeta,
-                  savingLLM: state.busy.savingLLM,
-                  rendering: state.busy.rendering,
-                }}
-              />
-            );
-          case 2:
-            return (
-              <StepPreview
-                engine={state.engine}
-                composeText={state.compose.text}
-                renderedYaml={state.renderedYaml}
-                tab={state.preview.tab}
-                onTabChange={(tab) => dispatch({ type: "SET_PREVIEW_TAB", tab })}
-                onRender={renderStage2}
-                busy={{ rendering: state.busy.rendering }}
-              />
-            );
-          case 3:
-            return (
-              <StepExport
-                engine={state.engine}
-                renderedYaml={state.renderedYaml}
-                onRefresh={refreshExportYaml}
-                onQuickUpdate={quickUpdateField}
-                busy={{ exporting: state.busy.exporting, patchingField: state.busy.patchingField }}
-              />
-            );
-          default:
-            return null;
-        }
-      }, [state]);
+      // Dialogs
+      const postLoadHasStage2 = Boolean(state.dialogs?.postLoadHasStage2);
+      const showPostLoadChooser = Boolean(state.dialogs?.postLoadChooserOpen);
 
+      // Header
       const headerSubtitle = useMemo(() => {
-        if (state.engine.has_stage2) {
-          return "Rendered output ready for export.";
-        }
-        if (state.engine.has_compose) {
-          return "Compose loaded. Configure metadata, then render.";
-        }
+        if (state.mode === "quick") return "Quick edit mode — patch fields and export.";
+        if (state.mode === "full") return "Full workflow — metadata, preview, export.";
+        if (state.engine.has_compose) return "Compose loaded. Choose a workflow.";
         return "Load a docker-compose.yml to begin.";
-      }, [state.engine.has_compose, state.engine.has_stage2]);
+      }, [state.mode, state.engine.has_compose]);
+
+      const modePillLabel = useMemo(() => {
+        if (state.mode === "full") return "Full Workflow";
+        if (state.mode === "quick") return "Quick Edit";
+        return "Wizard";
+      }, [state.mode]);
 
       return (
         <div className="app">
@@ -936,70 +783,100 @@
               <div className="appHeader__left">
                 <div className="appTitleRow">
                   <h1 className="appTitle">CasaOS Compose Visual Editor</h1>
-                  <span className="pill pill--muted">Wizard</span>
+                  <span className="pill pill--muted">{modePillLabel}</span>
                 </div>
                 <p className="appSubtitle">{headerSubtitle}</p>
               </div>
               <div className="appHeader__right">
-                <IconButton label="Refresh" loading={state.busy.syncing} onClick={() => syncUIState()}>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <path
-                      d="M20 12a8 8 0 1 1-2.34-5.66"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                    />
-                    <path
-                      d="M20 4v6h-6"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </IconButton>
+                <div className="row">
+                  {state.mode !== "landing" && (
+                    <button className="backLink" type="button" onClick={backToLanding}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M19 12H5m0 0l7-7m-7 7l7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                      Load new file
+                    </button>
+                  )}
+                  <IconButton label="Refresh" loading={state.busy.syncing} onClick={() => syncUIState()}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path
+                        d="M20 12a8 8 0 1 1-2.34-5.66"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                      />
+                      <path
+                        d="M20 4v6h-6"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </IconButton>
+                </div>
               </div>
             </div>
           </header>
 
-          <div className="stepperWrap">
-            <div className="container">
-              <Stepper
-                steps={STEPS}
-                activeIndex={state.wizard.stepIndex}
-                maxEnabledIndex={maxEnabledIndex}
-                onStepChange={(index) => dispatch({ type: "SET_STEP", stepIndex: index })}
-              />
-            </div>
-          </div>
+          {state.mode === "landing" && (
+            <LandingView
+              mode={state.compose.mode}
+              onModeChange={(mode) => dispatch({ type: "SET_COMPOSE_MODE", mode })}
+              composeText={state.compose.text}
+              composeFile={state.compose.file}
+              onComposeTextChange={(text) => dispatch({ type: "SET_COMPOSE_TEXT", text })}
+              onComposeFileChange={(file) => dispatch({ type: "SET_COMPOSE_FILE", file })}
+              onLoadFromFile={loadComposeFromFile}
+              onLoadFromText={loadComposeFromText}
+              engine={state.engine}
+              busy={state.busy.loadingCompose}
+            />
+          )}
 
-          <main className="main">
-            <div className="container">{mainContent}</div>
-          </main>
+          {state.mode === "full" && (
+            <FullWorkflowView
+              state={state}
+              dispatch={dispatch}
+              stepIndex={state.wizard.stepIndex}
+              maxEnabledIndex={maxEnabledIndex}
+              onBack={onBack}
+              onContinue={onContinue}
+              canContinue={canContinue}
+              downloadYaml={downloadYaml}
+              copyYaml={copyYaml}
+              fillMetadata={fillMetadata}
+              saveLLMSettings={saveLLMSettings}
+              renderStage2={renderStage2}
+              refreshExportYaml={refreshExportYaml}
+            />
+          )}
 
-          <footer className="footer">
-            <div className="container footer__inner">
-              <div className="footer__left">
-                <Button variant="secondary" disabled={state.wizard.stepIndex === 0} onClick={onBack}>
-                  Back
-                </Button>
-              </div>
-              <div className="footer__right">{footerRight}</div>
-            </div>
-          </footer>
+          {state.mode === "quick" && (
+            <QuickEditView
+              engine={state.engine}
+              renderedYaml={state.renderedYaml}
+              onRefresh={refreshExportYaml}
+              onQuickUpdate={quickUpdateField}
+              onBackToLanding={backToLanding}
+              downloadYaml={downloadYaml}
+              copyYaml={copyYaml}
+              busy={{ exporting: state.busy.exporting, patchingField: state.busy.patchingField }}
+            />
+          )}
 
           {showPostLoadChooser && (
             <div
-              className="modalBackdrop"
+              className="modalBackdrop modalBackdrop--animated"
               role="dialog"
               aria-modal="true"
               aria-label="Choose workflow"
             >
-              <div className="modalPanel" onClick={(event) => event.stopPropagation()}>
+              <div className="modalPanel modalPanel--animated" onClick={(event) => event.stopPropagation()}>
                 <Card>
                   <CardHeader
                     title="Choose workflow"
-                    subtitle="Pick the best flow for this file. You can always switch later via the stepper."
+                    subtitle="Pick the best flow for this file. You can always switch later."
                   />
                   <CardBody>
                     <div className="stack stack--md">
@@ -1016,14 +893,24 @@
                       )}
 
                       <div className="grid2">
-                        <div className="banner">
-                          <div className="banner__title">Full workflow</div>
+                        <div className="banner" style={{ cursor: "pointer" }} onClick={chooseFullWorkflow}>
+                          <div className="banner__title">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{ verticalAlign: "text-bottom", marginRight: 6 }}>
+                              <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                            Full Workflow
+                          </div>
                           <div className="banner__message">
                             Use Metadata (Params/LLM), Preview/Render, then Export.
                           </div>
                         </div>
-                        <div className="banner">
-                          <div className="banner__title">Quick update</div>
+                        <div className="banner" style={{ cursor: "pointer" }} onClick={chooseQuickUpdate}>
+                          <div className="banner__title">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{ verticalAlign: "text-bottom", marginRight: 6 }}>
+                              <path d="M13 10V3L4 14h7v7l9-11h-7z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                            Quick Edit
+                          </div>
                           <div className="banner__message">
                             Patch a single field (multi-language sync) and export immediately.
                           </div>
@@ -1035,13 +922,13 @@
                           variant={postLoadHasStage2 ? "secondary" : "primary"}
                           onClick={chooseFullWorkflow}
                         >
-                          Full workflow
+                          Full Workflow
                         </Button>
                         <Button
                           variant={postLoadHasStage2 ? "primary" : "secondary"}
                           onClick={chooseQuickUpdate}
                         >
-                          Quick update
+                          Quick Edit
                         </Button>
                       </div>
                     </div>
