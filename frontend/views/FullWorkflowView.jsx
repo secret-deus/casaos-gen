@@ -26,18 +26,15 @@
     renderStage2,
     refreshExportYaml,
   }) {
-    const { Button, Stepper, AnimatedContainer } = root.components || {};
+    const { Button, AnimatedContainer } = root.components || {};
     const { StepMetadata, StepPreview, ExportCard } = root.steps || {};
     const { clamp } = root.utils || {};
 
     const prevStepRef = useRef(stepIndex);
-
     const direction = stepIndex >= prevStepRef.current ? "forward" : "backward";
-    // Update ref after computing direction
     if (prevStepRef.current !== stepIndex) {
       prevStepRef.current = stepIndex;
     }
-
     const animClass = direction === "forward" ? "step-forward" : "step-backward";
 
     const stepContent = useMemo(() => {
@@ -102,7 +99,7 @@
     const footerRight = useMemo(() => {
       if (stepIndex === 2) {
         return (
-          <div className="footer__actions">
+          <div className="row">
             <Button
               variant="secondary"
               disabled={!state.engine.has_compose || !state.renderedYaml.trim()}
@@ -128,36 +125,17 @@
     }, [stepIndex, state.engine.has_compose, state.renderedYaml, canContinue]);
 
     return (
-      <div className="view-enter">
-        <div className="stepperWrap">
-          <div className="container">
-            <Stepper
-              steps={FULL_STEPS}
-              activeIndex={stepIndex}
-              maxEnabledIndex={maxEnabledIndex}
-              onStepChange={(index) => dispatch({ type: "SET_STEP", stepIndex: index })}
-            />
-          </div>
+      <div className="workflow-content">
+        <AnimatedContainer animationKey={stepIndex} className={animClass}>
+          {stepContent}
+        </AnimatedContainer>
+
+        <div className="workflow-footer">
+          <Button variant="secondary" onClick={onBack}>
+            Back
+          </Button>
+          <div className="workflow-footer__right">{footerRight}</div>
         </div>
-
-        <main className="main">
-          <div className="container">
-            <AnimatedContainer animationKey={stepIndex} className={animClass}>
-              {stepContent}
-            </AnimatedContainer>
-          </div>
-        </main>
-
-        <footer className="footer">
-          <div className="container footer__inner">
-            <div className="footer__left">
-              <Button variant="secondary" onClick={onBack}>
-                Back
-              </Button>
-            </div>
-            <div className="footer__right">{footerRight}</div>
-          </div>
-        </footer>
       </div>
     );
   }

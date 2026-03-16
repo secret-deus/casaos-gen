@@ -1,41 +1,49 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>CasaOS Compose Visual Editor</title>
-    <link rel="stylesheet" href="/static/styles.css" />
-  </head>
-  <body>
-    <div id="root"></div>
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-    <!-- UI primitives -->
-    <script type="text/babel" src="/static/components/utils.jsx"></script>
-    <script type="text/babel" src="/static/components/Button.jsx"></script>
-    <script type="text/babel" src="/static/components/Card.jsx"></script>
-    <script type="text/babel" src="/static/components/Form.jsx"></script>
-    <script type="text/babel" src="/static/components/Tabs.jsx"></script>
-    <script type="text/babel" src="/static/components/Stepper.jsx"></script>
-    <script type="text/babel" src="/static/components/Toast.jsx"></script>
-    <script type="text/babel" src="/static/components/CodeViewer.jsx"></script>
-    <script type="text/babel" src="/static/components/Dropzone.jsx"></script>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CasaOS Compose Visual Editor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,200..900;1,200..900&family=Inter:wght@100..900&family=JetBrains+Mono:wght@100..800&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
 
-    <!-- Steps -->
-    <script type="text/babel" src="/static/steps/StepLoadCompose.jsx"></script>
-    <script type="text/babel" src="/static/steps/StepMetadata.jsx"></script>
-    <script type="text/babel" src="/static/steps/StepPreview.jsx"></script>
-    <script type="text/babel" src="/static/steps/StepExport.jsx"></script>
+<body>
+  <div id="root"></div>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-    <!-- Views -->
-    <script type="text/babel" src="/static/components/AnimatedContainer.jsx"></script>
-    <script type="text/babel" src="/static/views/LandingView.jsx"></script>
-    <script type="text/babel" src="/static/views/FullWorkflowView.jsx"></script>
-    <script type="text/babel" src="/static/views/QuickEditView.jsx"></script>
+  <!-- UI primitives -->
+  <script type="text/babel" src="/static/components/utils.jsx"></script>
+  <script type="text/babel" src="/static/components/Button.jsx"></script>
+  <script type="text/babel" src="/static/components/Card.jsx"></script>
+  <script type="text/babel" src="/static/components/Form.jsx"></script>
+  <script type="text/babel" src="/static/components/Tabs.jsx"></script>
+  <script type="text/babel" src="/static/components/Stepper.jsx"></script>
+  <script type="text/babel" src="/static/components/Toast.jsx"></script>
+  <script type="text/babel" src="/static/components/CodeViewer.jsx"></script>
+  <script type="text/babel" src="/static/components/Dropzone.jsx"></script>
 
-    <!-- App -->
-    <script type="text/babel" src="/static/app.jsx"></script>
-  </body>
+  <!-- Steps -->
+  <script type="text/babel" src="/static/steps/StepLoadCompose.jsx"></script>
+  <script type="text/babel" src="/static/steps/StepMetadata.jsx"></script>
+  <script type="text/babel" src="/static/steps/StepPreview.jsx"></script>
+  <script type="text/babel" src="/static/steps/StepExport.jsx"></script>
+
+  <!-- Views -->
+  <script type="text/babel" src="/static/components/AnimatedContainer.jsx"></script>
+  <script type="text/babel" src="/static/views/LandingView.jsx"></script>
+  <script type="text/babel" src="/static/views/FullWorkflowView.jsx"></script>
+  <script type="text/babel" src="/static/views/QuickEditView.jsx"></script>
+
+  <!-- App -->
+  <script type="text/babel" src="/static/app.jsx"></script>
+</body>
+
 </html>

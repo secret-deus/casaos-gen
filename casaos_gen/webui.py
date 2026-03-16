@@ -1,23 +1,22 @@
-"""FastAPI-based Web UI for CasaOS compose generation and editing."""
+"""FastAPI-based Web UI for CasaOS compose generation and editing.
+
+Route definitions only. Business logic lives in web_services.py.
+"""
 from __future__ import annotations
 
 import json
 import logging
-import time
-import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional
 
 import uvicorn
-import yaml
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .compose_normalize import normalize_compose_for_appstore
-from .i18n import DEFAULT_LANGUAGES, TRANSLATION_MAP, wrap_multilang
+from .i18n import wrap_multilang
 from .llm_translate import LLMTranslationError
 from .models import CasaOSMeta
 from .pipeline import (
@@ -29,46 +28,36 @@ from .pipeline import (
     parse_params_text,
     render_compose,
 )
+from .web_services import (
+    LLM_CFG,
+    SessionState,
+    _SESSIONS,
+    _SESSIONS_LOCK,
+    build_assistant_prompt,
+    collect_target_context,
+    ensure_stage2_structure,
+    get_session,
+    load_llm_config,
+    parse_service_target,
+    propagate_translation,
+    require_llm_client,
+    require_meta,
+    safe_llm_config_dict,
+    save_llm_config,
+    seed_meta_from_existing_compose,
+    sync_meta_from_multilang_target,
+    translate_multilang_with_llm,
+    update_translation_map_from_multilang,
+)
 from .yaml_out import dump_yaml
 
-try:
-    from openai import OpenAI
-except ImportError:  # pragma: no cover - optional dependency during tests
-    OpenAI = None
+# Re-export for test compatibility
+LLMConfig = type(LLM_CFG)
 
 logger = logging.getLogger(__name__)
-LLM_CONFIG_PATH = Path("llm_config.json")
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 INDEX_HTML = FRONTEND_DIR / "index.html"
-
-
-@dataclass
-class LLMConfig:
-    """Global LLM configuration shared across all sessions."""
-    base_url: Optional[str] = None
-    api_key: Optional[str] = None
-    model: str = "gpt-4.1-mini"
-    temperature: float = 0.2
-
-
-@dataclass
-class SessionState:
-    """Per-session state isolated by cookie."""
-    compose_data: Optional[dict] = None
-    compose_text: str = ""
-    meta: Optional[CasaOSMeta] = None
-    languages: List[str] = field(default_factory=lambda: list(DEFAULT_LANGUAGES))
-    translation_map: Dict[str, Dict[str, str]] = field(
-        default_factory=lambda: {key: dict(value) for key, value in TRANSLATION_MAP.items()}
-    )
-    last_access: float = field(default_factory=time.time)
-
-
-_SESSIONS: Dict[str, SessionState] = {}
-_SESSION_COOKIE = "casaos_sid"
-_SESSION_TTL = 3600 * 4  # 4 hours
-LLM_CFG = LLMConfig()
 
 app = FastAPI(title="CasaOS Compose Generator UI")
 
@@ -76,438 +65,9 @@ if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 
-def get_session(request: Request, response: Response) -> SessionState:
-    """Get or create a session for the current request."""
-    now = time.time()
-    # Lazy cleanup of expired sessions
-    for sid in [k for k, v in _SESSIONS.items() if now - v.last_access > _SESSION_TTL]:
-        del _SESSIONS[sid]
-    # Get or create session
-    sid = request.cookies.get(_SESSION_COOKIE)
-    if sid and sid in _SESSIONS:
-        _SESSIONS[sid].last_access = now
-        return _SESSIONS[sid]
-    sid = uuid.uuid4().hex
-    session = SessionState()
-    _SESSIONS[sid] = session
-    response.set_cookie(
-        key=_SESSION_COOKIE, value=sid, httponly=True, samesite="lax", max_age=_SESSION_TTL
-    )
-    return session
-
-
-def _require_meta(session: SessionState) -> CasaOSMeta:
-    if session.meta is None or session.compose_data is None:
-        raise HTTPException(status_code=400, detail="No compose metadata is loaded yet.")
-    return session.meta
-
-
-def _parse_service_target(target: str) -> Tuple[str, str, str]:
-    parts = target.split(":")
-    if len(parts) < 4 or parts[0] != "service":
-        raise HTTPException(
-            status_code=400,
-            detail="Target must look like service:NAME:type:key (e.g. service:web:port:8080)",
-        )
-    service_name = parts[1]
-    field_type = parts[2]
-    identifier = ":".join(parts[3:])
-    return service_name, field_type, identifier
-
-
-def _propagate_translation(text: str, session: SessionState) -> None:
-    if not text:
-        return
-    entry = session.translation_map.setdefault(text, {})
-    for lang in session.languages:
-        if lang == "en_US":
-            continue
-        entry[lang] = text
-
-
-def _ensure_stage2_structure(session: SessionState, require_meta: bool = False) -> None:
-    if session.compose_data is None:
-        raise HTTPException(status_code=400, detail="No compose file loaded.")
-    if session.compose_data.get("x-casaos"):
-        return
-    if session.meta is None:
-        if require_meta:
-            raise HTTPException(status_code=400, detail="Stage 1 metadata unavailable. Run Stage 1 first.")
-        return
-    try:
-        session.compose_data = render_compose(
-            session.compose_data,
-            session.meta,
-            languages=session.languages,
-            translation_map_override=session.translation_map,
-            auto_translate=True,
-            llm_model=LLM_CFG.model,
-            llm_temperature=LLM_CFG.temperature,
-            llm_api_key=LLM_CFG.api_key,
-            llm_base_url=LLM_CFG.base_url,
-        )
-    except LLMTranslationError as exc:
-        logger.warning(
-            "Stage 2 auto-translate failed; falling back to translation table/copy behavior: %s",
-            exc,
-        )
-        session.compose_data = render_compose(
-            session.compose_data,
-            session.meta,
-            languages=session.languages,
-            translation_map_override=session.translation_map,
-            auto_translate=False,
-        )
-
-
-def _require_llm_client():
-    if OpenAI is None:
-        raise HTTPException(status_code=500, detail="openai package is not installed.")
-
-    client_kwargs = {}
-    if LLM_CFG.api_key:
-        client_kwargs["api_key"] = LLM_CFG.api_key
-    if LLM_CFG.base_url:
-        client_kwargs["base_url"] = LLM_CFG.base_url
-    try:
-        return OpenAI(**client_kwargs)
-    except Exception as exc:  # pragma: no cover - defensive logging
-        raise HTTPException(status_code=400, detail=f"Failed to initialize LLM client: {exc}") from exc
-
-
-def _parse_llm_json_response(content: str) -> Dict[str, Any]:
-    cleaned = (content or "").strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if cleaned.lower().startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-
-    if not cleaned.startswith("{"):
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            cleaned = cleaned[start : end + 1]
-
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        logger.error("Failed to parse LLM JSON: %s", exc)
-        raise HTTPException(status_code=400, detail="LLM returned invalid JSON.") from exc
-
-    if not isinstance(data, dict):
-        raise HTTPException(status_code=400, detail="LLM returned JSON that is not an object.")
-
-    return data
-
-
-def _build_translation_prompt(text: str, languages: List[str], source_language: Optional[str]) -> str:
-    language_list = json.dumps(languages, ensure_ascii=False)
-    source_hint = (
-        f"The source text locale is '{source_language}'. The value for that locale MUST match SOURCE_TEXT exactly."
-        if source_language
-        else "Detect the source language automatically. If SOURCE_TEXT is already written in one of the target locales, keep that locale EXACTLY equal to SOURCE_TEXT (no rewriting)."
-    )
-
-    return f"""
-You are a professional translator for software app store listings.
-
-Translate the SOURCE_TEXT into these target locales:
-{language_list}
-
-{source_hint}
-
-Rules:
-- Return ONLY valid JSON (no Markdown fences, no commentary).
-- The JSON MUST be an object where keys are exactly the locale codes above (no extra keys).
-- Values MUST be plain strings.
-- Preserve Markdown formatting, links, bullet lists, and line breaks.
-- Keep product names, environment variable names, port numbers, and file paths unchanged.
-- Do NOT add, remove, or reorder content.
-
-SOURCE_TEXT:
-{text}
-""".strip()
-
-
-def _translate_multilang_with_llm(text: str, source_language: Optional[str], session: SessionState) -> Dict[str, str]:
-    client = _require_llm_client()
-    prompt = _build_translation_prompt(text, session.languages, source_language)
-    temperature = max(0.0, min(float(LLM_CFG.temperature), 0.3))
-    try:
-        response = client.chat.completions.create(
-            model=LLM_CFG.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-        )
-    except Exception as exc:  # pragma: no cover - network/model errors
-        raise HTTPException(status_code=400, detail=f"LLM translation failed: {exc}") from exc
-
-    content = response.choices[0].message.content or ""
-    data = _parse_llm_json_response(content)
-
-    translations: Dict[str, str] = {}
-    for lang in session.languages:
-        value = data.get(lang)
-        translations[lang] = "" if value is None else str(value)
-
-    if source_language and source_language in translations:
-        translations[source_language] = text
-
-    english_text = translations.get("en_US") or ""
-    for lang in session.languages:
-        if translations[lang].strip():
-            continue
-        if lang == "en_US":
-            translations[lang] = english_text.strip() or text
-        else:
-            translations[lang] = english_text.strip() or text
-
-    return translations
-
-
-def _update_translation_map_from_multilang(translations: Dict[str, str], session: SessionState) -> None:
-    english_text = str(translations.get("en_US") or "").strip()
-    if not english_text:
-        return
-    entry = session.translation_map.setdefault(english_text, {})
-    for lang in session.languages:
-        if lang == "en_US":
-            continue
-        candidate = str(translations.get(lang) or "").strip()
-        if candidate:
-            entry[lang] = candidate
-
-
-def _sync_meta_from_multilang_target(target: str, translations: Dict[str, str], session: SessionState) -> None:
-    meta = session.meta
-    if meta is None:
-        return
-
-    english_text = str(translations.get("en_US") or "").strip()
-    if not english_text:
-        return
-
-    if target in {"app.title", "app.tagline", "app.description"}:
-        attr_name = target.split(".", 1)[1]
-        setattr(meta.app, attr_name, english_text)
-        return
-
-    parts = target.split(":")
-    if len(parts) >= 4 and parts[0] == "service" and parts[2] in {"env", "port", "volume"}:
-        service_name, field_type, identifier = _parse_service_target(target)
-        svc = meta.services.get(service_name)
-        if not svc:
-            return
-        items = {"env": svc.envs, "port": svc.ports, "volume": svc.volumes}.get(field_type)
-        if items is None:
-            return
-        target_item = next((item for item in items if item.container == identifier), None)
-        if target_item is None:
-            return
-        target_item.description = english_text
-
-
-def _resolve_app_stage2_value(field_path: str, session: SessionState):
-    compose = session.compose_data or {}
-    scope = compose.get("x-casaos") or {}
-    for key in field_path.split("."):
-        if not isinstance(scope, dict):
-            return None
-        scope = scope.get(key)
-        if scope is None:
-            return None
-    return scope
-
-
-def _resolve_service_stage2_multilang(service_name: str, field_type: str, identifier: str, session: SessionState):
-    compose = session.compose_data or {}
-    services = compose.get("services") or {}
-    service = services.get(service_name) or {}
-    x_block = service.get("x-casaos") or {}
-    plural_map = {"env": "envs", "port": "ports", "volume": "volumes"}
-    collection_name = plural_map.get(field_type)
-    if not collection_name:
-        return None
-    items = x_block.get(collection_name) or []
-    for item in items:
-        if item.get("container") == identifier:
-            return item.get("description")
-    return None
-
-
-def _resolve_service_stage2_single(service_name: str, field_path: str, session: SessionState):
-    compose = session.compose_data or {}
-    services = compose.get("services") or {}
-    service = services.get(service_name) or {}
-    scope = service.get("x-casaos") or {}
-    for key in field_path.split("."):
-        if not isinstance(scope, dict):
-            return None
-        scope = scope.get(key)
-        if scope is None:
-            return None
-    return scope
-
-
-def _collect_target_context(target: Optional[str], session: SessionState) -> str:
-    if not target:
-        return (
-            "Target: general editing mode. Help the user craft CasaOS metadata for compose files and "
-            "provide concise rewrites that are safe to copy into every locale."
-        )
-
-    lines = [f"Target field: {target}"]
-
-    if target.startswith("app."):
-        field_path = target.split(".", 1)[1]
-        if session.meta:
-            attr_name = field_path.split(".", 1)[0]
-            if hasattr(session.meta.app, attr_name):
-                lines.append(f"Stage 1 value: {getattr(session.meta.app, attr_name)}")
-        stage2_value = _resolve_app_stage2_value(field_path, session)
-        if stage2_value is not None:
-            lines.append(f"Stage 2 value: {stage2_value}")
-        return "\n".join(lines)
-
-    parts = target.split(":")
-    if len(parts) >= 4 and parts[0] == "service" and parts[2] in {"env", "port", "volume"}:
-        service_name, field_type = parts[1], parts[2]
-        identifier = ":".join(parts[3:])
-        if session.meta:
-            service_meta = session.meta.services.get(service_name)
-            if service_meta:
-                collection = getattr(service_meta, f"{field_type}s", [])
-                entry = next((item for item in collection if item.container == identifier), None)
-                if entry:
-                    lines.append(f"Stage 1 value: {entry.description}")
-        stage2_value = _resolve_service_stage2_multilang(service_name, field_type, identifier, session)
-        if stage2_value is not None:
-            lines.append(f"Stage 2 value: {stage2_value}")
-        return "\n".join(lines)
-
-    if len(parts) >= 3 and parts[0] == "service":
-        service_name = parts[1]
-        field_path = ":".join(parts[2:])
-        stage2_value = _resolve_service_stage2_single(service_name, field_path, session)
-        if stage2_value is not None:
-            lines.append(f"Stage 2 value: {stage2_value}")
-        return "\n".join(lines)
-
-    return "\n".join(lines)
-
-
-def _build_assistant_prompt(context: str) -> str:
-    base = (
-        "You are an AI writing partner embedded in a CasaOS compose visual editor. "
-        "Users will ask for help rewriting metadata that describes docker-compose applications. "
-        "Respond with actionable prose that can be copied verbatim into the metadata. "
-        "Keep answers under 120 words when possible. "
-        "When asked to rewrite a multi-language field, craft a single neutral English draft that can be propagated across all locales, "
-        "avoiding language-specific mentions."
-    )
-    return f"{base}\n\nContext:\n{context}"
-
-
-def _as_text(value: Any) -> str:
-    if isinstance(value, dict):
-        en_value = None
-        if "en_US" in value:
-            en_value = value.get("en_US")
-            if en_value is not None:
-                en_text = str(en_value)
-                if en_text.strip():
-                    return en_text
-        for candidate in value.values():
-            if candidate is None:
-                continue
-            if en_value is not None and candidate is en_value:
-                continue
-            text = str(candidate)
-            if text.strip():
-                return text
-        return ""
-    if value is None:
-        return ""
-    return str(value)
-
-
-def _seed_meta_from_existing_compose(meta: CasaOSMeta, compose_data: Dict[str, Any]) -> None:
-    """Prefer existing x-casaos values when loading an already-edited CasaOS YAML.
-
-    The Web UI normally builds a fresh Stage 1 metadata skeleton from docker-compose services.
-    When users upload a compose that already contains x-casaos blocks, we should hydrate the
-    Stage 1 meta from those values so "quick update" and form defaults reflect the file.
-    """
-
-    app_block = compose_data.get("x-casaos")
-    if not isinstance(app_block, dict):
-        return
-
-    for field in ("title", "tagline", "description"):
-        text = _as_text(app_block.get(field)).strip()
-        if text:
-            setattr(meta.app, field, text)
-
-    for field in ("category", "author", "developer", "main", "port_map", "scheme", "index"):
-        value = app_block.get(field)
-        if value is None:
-            continue
-        text = str(value).strip()
-        if text:
-            setattr(meta.app, field, text)
-
-    services = compose_data.get("services") or {}
-    if not isinstance(services, dict):
-        return
-
-    for service_name, service in services.items():
-        if not isinstance(service, dict):
-            continue
-        service_meta = meta.services.get(service_name)
-        if not service_meta:
-            continue
-        svc_block = service.get("x-casaos") or {}
-        if not isinstance(svc_block, dict):
-            continue
-        for list_key, attr_name in (("envs", "envs"), ("ports", "ports"), ("volumes", "volumes")):
-            items = svc_block.get(list_key) or []
-            if not isinstance(items, list):
-                continue
-            meta_items = getattr(service_meta, attr_name, [])
-            for entry in items:
-                if not isinstance(entry, dict):
-                    continue
-                container = str(entry.get("container") or "").strip()
-                description = _as_text(entry.get("description")).strip()
-                if not container or not description:
-                    continue
-                target_item = next((item for item in meta_items if item.container == container), None)
-                if target_item:
-                    target_item.description = description
-
-
-def _load_index_html() -> str:
-    if INDEX_HTML.exists():
-        return INDEX_HTML.read_text(encoding="utf-8")
-    logger.warning("Frontend index.html missing at %s", INDEX_HTML)
-    return """
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>CasaOS Compose UI</title>
-  </head>
-  <body>
-    <p>Frontend assets are missing. Please build the UI under the frontend/ directory.</p>
-  </body>
-</html>
-""".strip()
-
-
-def _log_deprecated(endpoint: str, replacement: str) -> None:
-    logger.warning("%s is deprecated; use %s instead.", endpoint, replacement)
-
+# ---------------------------------------------------------------------------
+# Pydantic request models
+# ---------------------------------------------------------------------------
 
 class FieldUpdate(BaseModel):
     target: str
@@ -542,6 +102,32 @@ class AssistantChatRequest(BaseModel):
     target: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Internal helpers (thin wrappers kept in routes file for readability)
+# ---------------------------------------------------------------------------
+
+def _load_index_html() -> str:
+    if INDEX_HTML.exists():
+        return INDEX_HTML.read_text(encoding="utf-8")
+    logger.warning("Frontend index.html missing at %s", INDEX_HTML)
+    return """
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>CasaOS Compose UI</title>
+  </head>
+  <body>
+    <p>Frontend assets are missing. Please build the UI under the frontend/ directory.</p>
+  </body>
+</html>
+""".strip()
+
+
+def _log_deprecated(endpoint: str, replacement: str) -> None:
+    logger.warning("%s is deprecated; use %s instead.", endpoint, replacement)
+
+
 def _update_meta_field(meta: CasaOSMeta, payload: FieldUpdate) -> None:
     if payload.target.startswith("app."):
         field = payload.target.split(".", 1)[1]
@@ -550,7 +136,7 @@ def _update_meta_field(meta: CasaOSMeta, payload: FieldUpdate) -> None:
         setattr(meta.app, field, payload.value)
         return
 
-    service_name, field_type, identifier = _parse_service_target(payload.target)
+    service_name, field_type, identifier = parse_service_target(payload.target)
     service_meta = meta.services.get(service_name)
     if not service_meta:
         raise HTTPException(status_code=404, detail=f"Service {service_name} not found in metadata.")
@@ -573,7 +159,7 @@ def _update_meta_field(meta: CasaOSMeta, payload: FieldUpdate) -> None:
 
 
 def _update_stage2_multi_field(payload: Stage2MultiUpdate, session: SessionState) -> List[str]:
-    _ensure_stage2_structure(session, require_meta=True)
+    ensure_stage2_structure(session, require_meta=True)
     compose = session.compose_data or {}
     overwrite_all = bool(payload.overwrite_all_languages)
     language = (payload.language or "").strip()
@@ -599,21 +185,20 @@ def _update_stage2_multi_field(payload: Stage2MultiUpdate, session: SessionState
             detail=f"Unknown language '{source_language}'. Available: {', '.join(session.languages)}",
         )
 
-    translations: Optional[Dict[str, str]] = None
+    translations = None
     if overwrite_all:
         try:
-            translations = _translate_multilang_with_llm(payload.value, source_language, session)
-        except HTTPException as exc:  # pragma: no cover - depends on network/LLM availability
+            translations = translate_multilang_with_llm(payload.value, source_language, session)
+        except HTTPException as exc:  # pragma: no cover
             logger.warning(
                 "LLM translation failed during multi-language update; falling back to copy behavior: %s",
                 exc.detail,
             )
             translations = {lang: payload.value for lang in session.languages}
             warnings.append("LLM unavailable; copied input to all locales (no translation performed).")
-        # Keep Stage 1 / translation map consistent so a future re-render won't erase translations.
-        _sync_meta_from_multilang_target(payload.target, translations, session)
+        sync_meta_from_multilang_target(payload.target, translations, session)
         if payload.target in {"app.title", "app.tagline", "app.description"} or payload.target.startswith("service:"):
-            _update_translation_map_from_multilang(translations, session)
+            update_translation_map_from_multilang(translations, session)
 
     if payload.target.startswith("app."):
         field_path = payload.target.split(".", 1)[1]
@@ -633,7 +218,7 @@ def _update_stage2_multi_field(payload: Stage2MultiUpdate, session: SessionState
             multilang[language] = payload.value
         return warnings
 
-    service_name, field_type, identifier = _parse_service_target(payload.target)
+    service_name, field_type, identifier = parse_service_target(payload.target)
     services = compose.get("services") or {}
     service = services.get(service_name)
     if not service:
@@ -667,7 +252,7 @@ def _update_stage2_multi_field(payload: Stage2MultiUpdate, session: SessionState
 
 
 def _update_stage2_single_field(payload: Stage2SingleUpdate, session: SessionState) -> None:
-    _ensure_stage2_structure(session, require_meta=True)
+    ensure_stage2_structure(session, require_meta=True)
     compose = session.compose_data or {}
 
     if payload.target.startswith("app."):
@@ -700,6 +285,10 @@ def _update_stage2_single_field(payload: Stage2SingleUpdate, session: SessionSta
     scope[fragments[-1]] = payload.value
 
 
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     return HTMLResponse(content=_load_index_html())
@@ -713,32 +302,19 @@ async def get_state(session: SessionState = Depends(get_session)) -> dict:
         "has_meta": session.meta is not None,
         "has_stage2": bool(session.compose_data and session.compose_data.get("x-casaos")),
         "meta": session.meta.model_dump() if session.meta else None,
-        "llm": {
-            "base_url": LLM_CFG.base_url,
-            "api_key": bool(LLM_CFG.api_key),
-            "model": LLM_CFG.model,
-            "temperature": LLM_CFG.temperature,
-        },
+        "llm": safe_llm_config_dict(),
     }
 
 
 @app.post("/api/llm")
-async def set_llm_config(
+async def set_llm_config_endpoint(
     base_url: Optional[str] = Form(None),
     api_key: Optional[str] = Form(None),
     model: Optional[str] = Form(None),
     temperature: Optional[float] = Form(None),
 ) -> dict:
     save_llm_config(base_url, api_key, model, temperature)
-    return {
-        "status": "ok",
-        "llm": {
-            "base_url": LLM_CFG.base_url,
-            "api_key": bool(LLM_CFG.api_key),
-            "model": LLM_CFG.model,
-            "temperature": LLM_CFG.temperature,
-        },
-    }
+    return {"status": "ok", "llm": safe_llm_config_dict()}
 
 
 @app.post("/api/compose")
@@ -746,10 +322,10 @@ async def load_compose(file: UploadFile = File(...), session: SessionState = Dep
     try:
         text = (await file.read()).decode("utf-8")
         compose_data = parse_compose_text(text)
+        meta = build_meta(compose_data)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to parse compose file: {exc}") from exc
-    meta = build_meta(compose_data)
-    _seed_meta_from_existing_compose(meta, compose_data)
+    seed_meta_from_existing_compose(meta, compose_data)
     session.compose_data = compose_data
     session.compose_text = text
     session.meta = meta
@@ -763,10 +339,10 @@ async def load_compose_text(payload: ComposeText, session: SessionState = Depend
         raise HTTPException(status_code=400, detail="Compose text is empty.")
     try:
         compose_data = parse_compose_text(raw_text)
+        meta = build_meta(compose_data)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to parse compose text: {exc}") from exc
-    meta = build_meta(compose_data)
-    _seed_meta_from_existing_compose(meta, compose_data)
+    seed_meta_from_existing_compose(meta, compose_data)
     session.compose_data = compose_data
     session.compose_text = raw_text
     session.meta = meta
@@ -852,7 +428,7 @@ async def fill_metadata(
                 base_url=llm_base_url or LLM_CFG.base_url,
                 prompt_instructions=llm_prompt,
             )
-        except Exception as exc:  # pragma: no cover - depends on network/LLM availability
+        except Exception as exc:  # pragma: no cover
             logger.warning("Stage 1 LLM fill failed; continuing without LLM: %s", exc)
             warnings.append(
                 "LLM unavailable; skipped LLM metadata fill. Configure Base URL/API key, or disable 'Use LLM'."
@@ -892,7 +468,7 @@ async def render_stage2(session: SessionState = Depends(get_session)) -> dict:
             llm_api_key=LLM_CFG.api_key,
             llm_base_url=LLM_CFG.base_url,
         )
-    except LLMTranslationError as exc:
+    except Exception as exc:
         logger.warning(
             "Stage 2 render failed with LLM auto-translate; falling back to translation table/copy behavior: %s",
             exc,
@@ -951,7 +527,7 @@ async def upload_compose(
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
         )
-    except Exception as exc:  # pragma: no cover - defensive logging
+    except Exception as exc:  # pragma: no cover
         logger.warning("Stage 2 build failed; falling back to minimal template: %s", exc)
         template_compose = compose_data
         template_compose["x-casaos"] = {
@@ -1014,12 +590,11 @@ async def build_template(
 
 @app.post("/api/meta/update")
 async def update_meta_field(payload: FieldUpdate, session: SessionState = Depends(get_session)) -> dict:
-    meta = _require_meta(session)
+    meta = require_meta(session)
     _update_meta_field(meta, payload)
     if payload.propagate_all_languages:
-        _propagate_translation(payload.value, session)
+        propagate_translation(payload.value, session)
     if payload.sync_stage2 and session.compose_data and isinstance(session.compose_data.get("x-casaos"), dict):
-        # Keep Stage 2 compose in sync for key app fields when editing Stage 1 meta.
         app_x = session.compose_data["x-casaos"]
         if payload.target in ("app.title", "app.tagline", "app.description"):
             attr_name = payload.target.split(".", 1)[1]
@@ -1043,9 +618,9 @@ async def update_stage2_single_field(payload: Stage2SingleUpdate, session: Sessi
 async def assistant_chat(payload: AssistantChatRequest, session: SessionState = Depends(get_session)) -> dict:
     if not payload.messages:
         raise HTTPException(status_code=400, detail="At least one message is required.")
-    client = _require_llm_client()
-    context = _collect_target_context(payload.target, session)
-    system_prompt = _build_assistant_prompt(context)
+    client = require_llm_client()
+    context = collect_target_context(payload.target, session)
+    system_prompt = build_assistant_prompt(context)
     chat_messages = [{"role": "system", "content": system_prompt}]
     chat_messages.extend({"role": msg.role, "content": msg.content} for msg in payload.messages)
     try:
@@ -1054,7 +629,7 @@ async def assistant_chat(payload: AssistantChatRequest, session: SessionState = 
             messages=chat_messages,
             temperature=LLM_CFG.temperature,
         )
-    except Exception as exc:  # pragma: no cover - defensive logging
+    except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=400, detail=f"LLM request failed: {exc}") from exc
     answer = response.choices[0].message.content or ""
     return {"status": "ok", "message": answer.strip(), "context": context}
@@ -1064,7 +639,7 @@ async def assistant_chat(payload: AssistantChatRequest, session: SessionState = 
 async def export_compose(session: SessionState = Depends(get_session)) -> PlainTextResponse:
     if session.compose_data is None:
         raise HTTPException(status_code=400, detail="No compose file loaded.")
-    _ensure_stage2_structure(session)
+    ensure_stage2_structure(session)
     compose = session.compose_data
     if not compose.get("x-casaos"):
         raise HTTPException(status_code=400, detail="Stage 2 data unavailable. Run Stage 1 first.")
@@ -1072,6 +647,10 @@ async def export_compose(session: SessionState = Depends(get_session)) -> PlainT
     yaml_text = dump_yaml(compose)
     return PlainTextResponse(yaml_text, media_type="text/yaml")
 
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
 
 def run(host: str = "127.0.0.1", port: int = 8001) -> None:
     """Launch the FastAPI web UI using uvicorn."""
@@ -1081,200 +660,3 @@ def run(host: str = "127.0.0.1", port: int = 8001) -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     run()
-
-
-def load_llm_config() -> None:
-    if LLM_CONFIG_PATH.exists():
-        try:
-            data = json.loads(LLM_CONFIG_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            logger.warning("Failed to parse llm_config.json")
-            return
-        LLM_CFG.base_url = data.get("base_url")
-        LLM_CFG.api_key = data.get("api_key")
-        LLM_CFG.model = data.get("model", LLM_CFG.model)
-        LLM_CFG.temperature = data.get("temperature", LLM_CFG.temperature)
-
-
-def save_llm_config(
-    base_url: Optional[str],
-    api_key: Optional[str],
-    model: Optional[str],
-    temperature: Optional[float],
-) -> None:
-    if base_url is not None:
-        LLM_CFG.base_url = base_url or None
-    if api_key is not None:
-        LLM_CFG.api_key = api_key or None
-    if model is not None:
-        LLM_CFG.model = model or LLM_CFG.model
-    if temperature is not None:
-        LLM_CFG.temperature = temperature
-    LLM_CONFIG_PATH.write_text(
-        json.dumps(
-            {
-                "base_url": LLM_CFG.base_url,
-                "api_key": LLM_CFG.api_key,
-                "model": LLM_CFG.model,
-                "temperature": LLM_CFG.temperature,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-
-load_llm_config()
-
-
-# ========== 版本管理 API ==========
-
-from datetime import datetime
-from .incremental import (
-    get_version_history,
-    rollback_version as rollback_to_version,
-    show_compose_diff,
-    incremental_update,
-)
-
-
-class RollbackRequest(BaseModel):
-    version_file: str
-
-
-class IncrementalUpdateRequest(BaseModel):
-    force_regenerate: bool = False
-    params: Optional[dict] = None
-
-
-@app.get("/api/versions")
-async def list_versions() -> dict:
-    """列出所有历史版本"""
-    try:
-        versions = get_version_history()
-        # 格式化时间戳
-        formatted_versions = []
-        for v in versions:
-            formatted_versions.append({
-                "file": v["file"],
-                "timestamp": datetime.fromtimestamp(v["timestamp"]).strftime("%Y-%m-%d %H:%M:%S"),
-                "size": v["size"],
-                "size_kb": round(v["size"] / 1024, 1),
-            })
-        return {"status": "ok", "versions": formatted_versions}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to list versions: {exc}") from exc
-
-
-@app.post("/api/versions/rollback")
-async def rollback(payload: RollbackRequest, session: SessionState = Depends(get_session)) -> dict:
-    """回滚到指定版本"""
-    try:
-        rollback_to_version(payload.version_file)
-        # 重新加载元数据
-        from .version_manager import VersionManager
-        vm = VersionManager()
-        session.meta = vm.load_current_meta()
-        return {
-            "status": "ok",
-            "message": f"已回滚到版本: {payload.version_file}",
-            "meta": session.meta.model_dump() if session.meta else None,
-        }
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Rollback failed: {exc}") from exc
-
-
-@app.get("/api/diff")
-async def get_compose_diff(session: SessionState = Depends(get_session)) -> dict:
-    """获取当前 compose 文件与历史版本的差异"""
-    if not session.compose_text:
-        raise HTTPException(status_code=400, detail="No compose file loaded.")
-
-    try:
-        # 保存当前 compose 到临时文件
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False, encoding='utf-8') as f:
-            f.write(session.compose_text)
-            temp_path = Path(f.name)
-
-        try:
-            diff = show_compose_diff(temp_path)
-        finally:
-            temp_path.unlink()  # 删除临时文件
-
-        if diff is None:
-            return {"status": "ok", "has_diff": False, "message": "没有旧版本可对比"}
-
-        return {
-            "status": "ok",
-            "has_diff": diff.has_changes(),
-            "summary": diff.summary(),
-            "added_services": list(diff.added_services),
-            "removed_services": list(diff.removed_services),
-            "added_fields_count": len(diff.added_fields),
-            "removed_fields_count": len(diff.removed_fields),
-            "modified_fields_count": len(diff.modified_fields),
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to compute diff: {exc}") from exc
-
-
-@app.post("/api/incremental")
-async def incremental_update_api(
-    payload: IncrementalUpdateRequest, session: SessionState = Depends(get_session)
-) -> dict:
-    """执行增量更新"""
-    if not session.compose_text:
-        raise HTTPException(status_code=400, detail="No compose file loaded.")
-
-    try:
-        # 保存当前 compose 到临时文件
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False, encoding='utf-8') as f:
-            f.write(session.compose_text)
-            temp_path = Path(f.name)
-
-        try:
-            # LLM 配置
-            llm_config = {
-                "model": LLM_CFG.model,
-                "temperature": LLM_CFG.temperature,
-                "api_key": LLM_CFG.api_key,
-                "base_url": LLM_CFG.base_url,
-            } if LLM_CFG.api_key or LLM_CFG.base_url else None
-
-            # 执行增量更新
-            meta, diff = incremental_update(
-                compose_path=temp_path,
-                params=payload.params,
-                force_regenerate=payload.force_regenerate,
-                llm_config=llm_config,
-            )
-        finally:
-            temp_path.unlink()  # 删除临时文件
-
-        # 更新状态
-        session.meta = meta
-
-        # 重新解析 compose（因为可能有新增服务）
-        session.compose_data = parse_compose_text(session.compose_text)
-
-        result = {
-            "status": "ok",
-            "message": "增量更新完成",
-            "meta": meta.model_dump(),
-        }
-
-        if diff and diff.has_changes():
-            result["diff"] = {
-                "added_services": list(diff.added_services),
-                "removed_services": list(diff.removed_services),
-                "added_fields_count": len(diff.added_fields),
-                "removed_fields_count": len(diff.removed_fields),
-            }
-
-        return result
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Incremental update failed: {exc}") from exc

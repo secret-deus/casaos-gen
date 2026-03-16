@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 
 import yaml
 
+from .exceptions import ComposeParseError
 from .constants import (
     STORE_FOLDER_PLACEHOLDER,
     build_cdn_icon_url,
@@ -50,7 +51,7 @@ def load_compose_file(path: Path) -> Dict:
 
     if not isinstance(data, dict):
 
-        raise ValueError("Compose file did not produce a mapping")
+        raise ComposeParseError("Compose file did not produce a mapping")
 
     return data
 
@@ -176,7 +177,7 @@ def build_casaos_meta(compose_data: Dict) -> CasaOSMeta:
 
     if not services:
 
-        raise ValueError("Compose file must include services")
+        raise ComposeParseError("Compose file must include services")
 
 
 
@@ -251,24 +252,8 @@ def build_casaos_meta(compose_data: Dict) -> CasaOSMeta:
 
 
 
-def _normalize_multilang(value, languages: List[str]) -> Dict[str, str]:
-    if isinstance(value, dict):
-        return {lang: str(value.get(lang, "") or "") for lang in languages}
-    if value is None:
-        return {lang: "" for lang in languages}
-    text = str(value)
-    return {lang: text for lang in languages}
-
-
-def _normalize_tips(value, languages: List[str]):
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        return value
-    normalized = {}
-    for section, payload in value.items():
-        normalized[section] = _normalize_multilang(payload, languages)
-    return normalized
+from .utils import normalize_multilang as _normalize_multilang
+from .utils import normalize_tips as _normalize_tips
 
 
 def build_xcasaos_template(compose_data: Dict, languages: List[str]) -> Dict:

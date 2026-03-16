@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from .exceptions import ComposeParseError, ParamsError
+
 from .constants import CDN_BASE, STORE_FOLDER_PLACEHOLDER
 from .i18n import DEFAULT_LANGUAGES
 from .infer import infer_author, infer_category, infer_main_port, infer_main_service
@@ -35,9 +37,9 @@ def load_template_params(path: Optional[Path]) -> Dict[str, Any]:
     raw = path.read_text(encoding="utf-8")
     data = yaml.safe_load(raw) or {}
     if not isinstance(data, dict):
-        raise ValueError("Params file must be a YAML mapping")
+        raise ParamsError("Params file must be a YAML mapping")
     if "app" not in data:
-        raise ValueError(
+        raise ParamsError(
             "Params file must include top-level 'app:' mapping. "
             "If you passed a compose YAML by mistake, generate a params file first "
             "with: casaos-gen <compose.yml> --stage params"
@@ -73,7 +75,7 @@ def build_template_compose(
 
     services = compose_data.get("services") or {}
     if not services:
-        raise ValueError("Compose file must include services")
+        raise ComposeParseError("Compose file must include services")
 
     main_service = infer_main_service(services)
     inferred_port_map = infer_main_port(services.get(main_service, {}))
@@ -167,7 +169,7 @@ def build_params_skeleton(compose_data: Dict[str, Any]) -> Dict[str, Any]:
     """Build a params.yml skeleton from a normal docker-compose.yml dict."""
     services = compose_data.get("services") or {}
     if not services:
-        raise ValueError("Compose file must include services")
+        raise ComposeParseError("Compose file must include services")
 
     main_service = infer_main_service(services)
     inferred_port_map = infer_main_port(services.get(main_service, {}))

@@ -124,7 +124,8 @@ def collect_port_pairs(service: Dict) -> List[Tuple[Optional[str], Optional[str]
 
 def infer_main_service(services: Dict[str, Dict]) -> str:
     if not services:
-        raise ValueError("Compose file does not define any services")
+        from .exceptions import ComposeParseError
+        raise ComposeParseError("Compose file does not define any services")
 
     if len(services) == 1:
         return next(iter(services))

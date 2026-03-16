@@ -23,28 +23,13 @@ class LLMTranslationError(RuntimeError):
 
 
 def _parse_json_object(content: str) -> Dict[str, Any]:
-    cleaned = (content or "").strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if cleaned.lower().startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-
-    if not cleaned.startswith("{"):
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            cleaned = cleaned[start : end + 1]
+    """Parse JSON object from LLM response. Delegates to shared utility."""
+    from .utils import parse_llm_json
 
     try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
+        return parse_llm_json(content)
+    except (json.JSONDecodeError, ValueError) as exc:
         raise LLMTranslationError(f"LLM returned invalid JSON: {exc}") from exc
-
-    if not isinstance(data, dict):
-        raise LLMTranslationError("LLM returned JSON that is not an object.")
-
-    return data
 
 
 def build_translation_prompt(

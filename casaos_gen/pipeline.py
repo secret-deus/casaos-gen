@@ -6,57 +6,38 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from .constants import CDN_BASE, STORE_FOLDER_PLACEHOLDER
+from .exceptions import ComposeParseError, ParamsError
 from .i18n import DEFAULT_LANGUAGES, load_translation_map
-from .llm_translate import translate_texts_with_llm
 from .llm_stage1 import run_stage1_llm
+from .llm_translate import translate_texts_with_llm
 from .models import CasaOSMeta
 from .parser import build_casaos_meta
-from .constants import CDN_BASE, STORE_FOLDER_PLACEHOLDER
 from .template_stage import build_template_compose
+from .utils import as_list, as_text, clean_list
 from .yaml_out import build_final_compose
 
 
 def parse_compose_text(text: str) -> Dict:
     data = yaml.safe_load(text) or {}
     if not isinstance(data, dict):
-        raise ValueError("Compose content must be a YAML mapping.")
+        raise ComposeParseError("Compose content must be a YAML mapping.")
     return data
 
 
 def parse_params_text(text: str) -> Dict:
     data = yaml.safe_load(text) or {}
     if not isinstance(data, dict):
-        raise ValueError("Params content must be a YAML mapping.")
+        raise ParamsError("Params content must be a YAML mapping.")
     if "app" not in data:
-        raise ValueError("Params content must include top-level 'app:' mapping.")
+        raise ParamsError("Params content must include top-level 'app:' mapping.")
     return data
 
 
-def _as_text(value: Any) -> str:
-    if isinstance(value, dict):
-        if "en_US" in value:
-            return str(value.get("en_US") or "")
-        for candidate in value.values():
-            if candidate is not None:
-                return str(candidate)
-        return ""
-    if value is None:
-        return ""
-    return str(value)
-
-
-def _as_list(value: Any) -> List[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [str(item) for item in value if item is not None]
-    if isinstance(value, str):
-        return [value]
-    return []
-
-
-def _clean_list(values: List[str]) -> List[str]:
-    return [item.strip() for item in values if str(item).strip()]
+# Re-export for backward compatibility (used by other modules importing from pipeline)
+_as_text = as_text
+_as_list = as_list
+_clean_list = clean_list
 
 
 def _replace_store_folder_placeholder(value: str, store_folder: str) -> str:

@@ -932,8 +932,14 @@ class TestVersionManager(unittest.TestCase):
 
     def test_rollback_nonexistent_raises(self):
         vm = VersionManager(self.work_dir)
-        with self.assertRaises(FileNotFoundError):
+        # Invalid filename format triggers VersionError (path-traversal protection)
+        from casaos_gen.exceptions import VersionError
+        with self.assertRaises(VersionError):
             vm.rollback_to_version("nonexistent.json")
+        # Valid format but missing file triggers VersionError
+        from casaos_gen.exceptions import VersionError
+        with self.assertRaises(VersionError):
+            vm.rollback_to_version("meta.20200101_000000.json")
 
     def test_compose_backup(self):
         vm = VersionManager(self.work_dir)
@@ -1061,6 +1067,135 @@ class TestCLI(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             cli_main(["--stage", "all"])
         self.assertNotEqual(ctx.exception.code, 0)
+
+
+class TestUtils(unittest.TestCase):
+    """Tests for casaos_gen.utils shared helpers."""
+
+    def test_parse_llm_json_plain(self):
+        from casaos_gen.utils import parse_llm_json
+        result = parse_llm_json('{"key": "value"}')
+        self.assertEqual(result, {"key": "value"})
+
+    def test_parse_llm_json_with_markdown_fences(self):
+        from casaos_gen.utils import parse_llm_json
+        result = parse_llm_json('```json\n{"key": "value"}\n```')
+        self.assertEqual(result, {"key": "value"})
+
+    def test_parse_llm_json_with_leading_text(self):
+        from casaos_gen.utils import parse_llm_json
+        result = parse_llm_json('Here is the JSON:\n{"key": "value"}\nDone.')
+        self.assertEqual(result, {"key": "value"})
+
+    def test_parse_llm_json_invalid_raises(self):
+        from casaos_gen.utils import parse_llm_json
+        with self.assertRaises(json.JSONDecodeError):
+            parse_llm_json("not json at all")
+
+    def test_parse_llm_json_non_object_raises(self):
+        from casaos_gen.utils import parse_llm_json
+        from casaos_gen.exceptions import LLMResponseError
+        with self.assertRaises(LLMResponseError):
+            parse_llm_json("[1, 2, 3]")
+
+    def test_as_text_dict_with_en_us(self):
+        from casaos_gen.utils import as_text
+        self.assertEqual(as_text({"en_US": "hello", "zh_CN": "你好"}), "hello")
+
+    def test_as_text_dict_without_en_us(self):
+        from casaos_gen.utils import as_text
+        result = as_text({"zh_CN": "你好"})
+        self.assertEqual(result, "你好")
+
+    def test_as_text_none(self):
+        from casaos_gen.utils import as_text
+        self.assertEqual(as_text(None), "")
+
+    def test_as_text_plain_string(self):
+        from casaos_gen.utils import as_text
+        self.assertEqual(as_text("hello"), "hello")
+
+    def test_as_list_none(self):
+        from casaos_gen.utils import as_list
+        self.assertEqual(as_list(None), [])
+
+    def test_as_list_string(self):
+        from casaos_gen.utils import as_list
+        self.assertEqual(as_list("single"), ["single"])
+
+    def test_as_list_list(self):
+        from casaos_gen.utils import as_list
+        self.assertEqual(as_list(["a", "b"]), ["a", "b"])
+
+    def test_clean_list(self):
+        from casaos_gen.utils import clean_list
+        self.assertEqual(clean_list(["  a  ", "", "  ", "b"]), ["a", "b"])
+
+    def test_normalize_multilang_dict(self):
+        from casaos_gen.utils import normalize_multilang
+        result = normalize_multilang({"en_US": "hello"}, ["en_US", "zh_CN"])
+        self.assertEqual(result, {"en_US": "hello", "zh_CN": ""})
+
+    def test_normalize_multilang_string(self):
+        from casaos_gen.utils import normalize_multilang
+        result = normalize_multilang("hello", ["en_US", "zh_CN"])
+        self.assertEqual(result, {"en_US": "hello", "zh_CN": "hello"})
+
+    def test_normalize_multilang_none(self):
+        from casaos_gen.utils import normalize_multilang
+        result = normalize_multilang(None, ["en_US"])
+        self.assertEqual(result, {"en_US": ""})
+
+    def test_normalize_tips(self):
+        from casaos_gen.utils import normalize_tips
+        result = normalize_tips({"before_install": "Run setup"}, ["en_US", "zh_CN"])
+        self.assertEqual(result["before_install"]["en_US"], "Run setup")
+        self.assertEqual(result["before_install"]["zh_CN"], "Run setup")
+
+    def test_normalize_tips_none(self):
+        from casaos_gen.utils import normalize_tips
+        self.assertIsNone(normalize_tips(None, ["en_US"]))
+
+    def test_validate_version_filename_valid(self):
+        from casaos_gen.utils import validate_version_filename
+        self.assertEqual(
+            validate_version_filename("meta.20260108_143022.json"),
+            "meta.20260108_143022.json",
+        )
+
+    def test_validate_version_filename_path_traversal(self):
+        from casaos_gen.utils import validate_version_filename
+        from casaos_gen.exceptions import VersionError
+        with self.assertRaises(VersionError):
+            validate_version_filename("../../../etc/passwd")
+
+    def test_validate_version_filename_arbitrary_name(self):
+        from casaos_gen.utils import validate_version_filename
+        from casaos_gen.exceptions import VersionError
+        with self.assertRaises(VersionError):
+            validate_version_filename("malicious.json")
+
+
+class TestVersionManagerPathTraversal(unittest.TestCase):
+    """Ensure rollback rejects path-traversal filenames."""
+
+    def setUp(self):
+        self.work_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.work_dir)
+
+    def test_rollback_rejects_path_traversal(self):
+        from casaos_gen.exceptions import VersionError
+        vm = VersionManager(self.work_dir)
+        with self.assertRaises(VersionError):
+            vm.rollback_to_version("../../etc/passwd")
+
+    def test_rollback_rejects_arbitrary_filename(self):
+        from casaos_gen.exceptions import VersionError
+        vm = VersionManager(self.work_dir)
+        with self.assertRaises(VersionError):
+            vm.rollback_to_version("config.json")
 
 
 if __name__ == "__main__":

@@ -75,7 +75,8 @@ def refine_user_inputs(
     """
     if client is None:
         if OpenAI is None:
-            raise RuntimeError(
+            from .exceptions import LLMUnavailableError
+            raise LLMUnavailableError(
                 "openai package is not available. Install it or provide a custom client."
             )
         client_kwargs = {}
@@ -98,8 +99,8 @@ def refine_user_inputs(
     logger.debug("LLM refine response: %s", content[:400])
     
     # 解析 JSON 响应
-    from .llm_stage1 import _parse_json_response
-    data = _parse_json_response(content)
+    from .utils import parse_llm_json
+    data = parse_llm_json(content)
     meta = CasaOSMeta.model_validate(data)
     
     logger.info("User inputs refined successfully")

@@ -36,7 +36,7 @@
       return "";
     }
 
-    const listName = { env: "envs", port: "ports", volume: "volumes" }[fieldType];
+    const listName = root.utils.SERVICE_LIST_MAP[fieldType];
     if (!listName) {
       return "";
     }
@@ -47,6 +47,7 @@
   }
 
   function classifyTarget(target) {
+    const { APP_MULTILANG_FIELDS, APP_SINGLE_FIELDS, SERVICE_FIELD_TYPES } = root.utils;
     const rawTarget = String(target || "").trim();
     if (!rawTarget) {
       return { kind: "invalid" };
@@ -54,23 +55,10 @@
 
     if (rawTarget.startsWith("app.")) {
       const fieldPath = rawTarget.slice("app.".length);
-      const multiLanguageFields = new Set(["title", "tagline", "description"]);
-      const singleLanguageFields = new Set([
-        "category",
-        "author",
-        "developer",
-        "main",
-        "port_map",
-        "scheme",
-        "index",
-        "icon",
-        "thumbnail",
-      ]);
-
-      if (multiLanguageFields.has(fieldPath) || fieldPath.startsWith("tips.")) {
+      if (APP_MULTILANG_FIELDS.has(fieldPath) || fieldPath.startsWith("tips.")) {
         return { kind: "app_multilang", fieldPath };
       }
-      if (singleLanguageFields.has(fieldPath)) {
+      if (APP_SINGLE_FIELDS.has(fieldPath)) {
         return { kind: "app_single", fieldPath };
       }
       return { kind: "app_unknown", fieldPath };
@@ -78,7 +66,7 @@
 
     if (rawTarget.startsWith("service:")) {
       const parts = rawTarget.split(":");
-      if (parts.length >= 4 && ["env", "port", "volume"].includes(parts[2])) {
+      if (parts.length >= 4 && SERVICE_FIELD_TYPES.has(parts[2])) {
         return { kind: "service_multilang", serviceName: parts[1], fieldType: parts[2], identifier: parts.slice(3).join(":") };
       }
       if (parts.length >= 3) {

@@ -78,24 +78,8 @@ def _prepare_for_yaml_dump(data: Any) -> Any:
     return data
 
 
-def _normalize_multilang(value: Any, languages: List[str]) -> Dict[str, str]:
-    if isinstance(value, dict):
-        return {lang: str(value.get(lang, "") or "") for lang in languages}
-    if value is None:
-        return {lang: "" for lang in languages}
-    text = str(value)
-    return {lang: text for lang in languages}
-
-
-def _normalize_tips(value: Any, languages: List[str]) -> Any:
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        return value
-    normalized: Dict[str, Any] = {}
-    for section, payload in value.items():
-        normalized[section] = _normalize_multilang(payload, languages)
-    return normalized
+from .utils import normalize_multilang as _normalize_multilang
+from .utils import normalize_tips as _normalize_tips
 
 
 def dump_yaml(data: Any) -> str:

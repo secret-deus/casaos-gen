@@ -596,21 +596,18 @@
         try {
           const nextValue = String(value ?? "");
 
+          const { APP_MULTILANG_FIELDS, APP_SINGLE_FIELDS, SERVICE_FIELD_TYPES } = root.utils;
           const targetParts = targetValue.split(":");
           const isAppTarget = targetValue.startsWith("app.");
           const isServiceMultilangTarget =
             targetParts.length >= 4 &&
             targetParts[0] === "service" &&
-            ["env", "port", "volume"].includes(targetParts[2]);
+            SERVICE_FIELD_TYPES.has(targetParts[2]);
           const isServiceSingleTarget = targetParts.length >= 3 && targetParts[0] === "service" && !isServiceMultilangTarget;
 
           const appFieldPath = isAppTarget ? targetValue.slice("app.".length) : "";
-          const appMultilangFields = new Set(["title", "tagline", "description"]);
-          const appSingleFields = new Set([
-            "category", "author", "developer", "main", "port_map", "scheme", "index", "icon", "thumbnail",
-          ]);
-          const isAppMultilangTarget = isAppTarget && (appMultilangFields.has(appFieldPath) || appFieldPath.startsWith("tips."));
-          const isAppSingleTarget = isAppTarget && appSingleFields.has(appFieldPath);
+          const isAppMultilangTarget = isAppTarget && (APP_MULTILANG_FIELDS.has(appFieldPath) || appFieldPath.startsWith("tips."));
+          const isAppSingleTarget = isAppTarget && APP_SINGLE_FIELDS.has(appFieldPath);
 
           if (isAppMultilangTarget && !isMultilang) {
             pushToast({ title: "Wrong mode", message: "This app target is multi-language. Turn on multi-language mode.", variant: "warning" });
@@ -633,12 +630,9 @@
             return false;
           }
 
-          const canMetaUpdateAppFields = new Set([
-            "title", "tagline", "description", "category", "author", "developer", "main", "port_map", "scheme", "index",
-          ]);
           const shouldUpdateMeta =
             Boolean(state.engine.has_meta) &&
-            ((isAppTarget && canMetaUpdateAppFields.has(appFieldPath)) || isServiceMultilangTarget);
+            ((isAppTarget && root.utils.APP_META_UPDATABLE_FIELDS.has(appFieldPath)) || isServiceMultilangTarget);
           const shouldUpdateMetaValue = shouldUpdateMeta && !isMultilang;
 
           if (shouldUpdateMetaValue) {
@@ -725,9 +719,7 @@
       // Navigation
       const maxEnabledIndex = state.wizard.unlockedIndex;
 
-      const canContinue = useMemo(() => {
-        return state.engine.has_compose;
-      }, [state.engine.has_compose]);
+      const canContinue = state.engine.has_compose;
 
       const onBack = () => {
         if (state.wizard.stepIndex === 0) {
@@ -763,182 +755,141 @@
       const showPostLoadChooser = Boolean(state.dialogs?.postLoadChooserOpen);
 
       // Header
-      const headerSubtitle = useMemo(() => {
-        if (state.mode === "quick") return "Quick edit mode — patch fields and export.";
-        if (state.mode === "full") return "Full workflow — metadata, preview, export.";
-        if (state.engine.has_compose) return "Compose loaded. Choose a workflow.";
-        return "Load a docker-compose.yml to begin.";
-      }, [state.mode, state.engine.has_compose]);
+      const headerSubtitle =
+        state.mode === "quick" ? "Quick edit mode — patch fields and export."
+          : state.mode === "full" ? "Full workflow — metadata, preview, export."
+            : state.engine.has_compose ? "Compose loaded. Choose a workflow."
+              : "Load a docker-compose.yml to begin.";
 
-      const modePillLabel = useMemo(() => {
-        if (state.mode === "full") return "Full Workflow";
-        if (state.mode === "quick") return "Quick Edit";
-        return "Wizard";
-      }, [state.mode]);
+      const modePillLabel =
+        state.mode === "full" ? "Full Workflow"
+          : state.mode === "quick" ? "Quick Edit"
+            : "Wizard";
 
       return (
-        <div className="app">
-          <header className="appHeader">
-            <div className="appHeader__inner">
-              <div className="appHeader__left">
-                <div className="appTitleRow">
-                  <h1 className="appTitle">CasaOS Compose Visual Editor</h1>
-                  <span className="pill pill--muted">{modePillLabel}</span>
-                </div>
-                <p className="appSubtitle">{headerSubtitle}</p>
+        <div className="app-layout">
+          <header className="top-bar">
+            <div className="top-bar__left">
+              <div className="logo" onClick={backToLanding} style={{ cursor: 'pointer' }}>
+                <div className="logo__icon">C</div>
+                <div className="logo__text">Studio</div>
               </div>
-              <div className="appHeader__right">
-                <div className="row">
-                  {state.mode !== "landing" && (
-                    <button className="backLink" type="button" onClick={backToLanding}>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                        <path d="M19 12H5m0 0l7-7m-7 7l7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                      Load new file
+            </div>
+
+            <div className="top-bar__center">
+              {state.mode === "full" && (
+                <div className="horizontal-stepper">
+                  {[
+                    { idx: 0, label: "Metadata" },
+                    { idx: 1, label: "Preview" },
+                    { idx: 2, label: "Export" }
+                  ].map(step => (
+                    <button
+                      key={step.idx}
+                      className={cx("h-step", {
+                        "h-step--active": state.wizard.stepIndex === step.idx,
+                        "h-step--locked": step.idx > state.wizard.unlockedIndex
+                      })}
+                      disabled={step.idx > state.wizard.unlockedIndex}
+                      onClick={() => dispatch({ type: "SET_STEP", stepIndex: step.idx })}
+                    >
+                      <span className="h-step__num">{step.idx + 1}</span>
+                      <span className="h-step__label">{step.label}</span>
                     </button>
-                  )}
-                  <IconButton label="Refresh" loading={state.busy.syncing} onClick={() => syncUIState()}>
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                      <path
-                        d="M20 12a8 8 0 1 1-2.34-5.66"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                      />
-                      <path
-                        d="M20 4v6h-6"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  </IconButton>
+                  ))}
                 </div>
+              )}
+            </div>
+
+            <div className="top-bar__right">
+              <div className="engine-status">
+                <div className={cx("status-dot", { "status-dot--online": state.engine.lastSyncedAt })}></div>
+                <span className="status-text">{state.engine.lastSyncedAt ? "Live" : "Offline"}</span>
               </div>
+              <IconButton label="Sync" loading={state.busy.syncing} onClick={() => syncUIState()}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                  <path d="M21 2v6h-6M3 22v-6h6M21 13a9 9 0 11-3-7.7L21 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </IconButton>
             </div>
           </header>
 
-          {state.mode === "landing" && (
-            <LandingView
-              mode={state.compose.mode}
-              onModeChange={(mode) => dispatch({ type: "SET_COMPOSE_MODE", mode })}
-              composeText={state.compose.text}
-              composeFile={state.compose.file}
-              onComposeTextChange={(text) => dispatch({ type: "SET_COMPOSE_TEXT", text })}
-              onComposeFileChange={(file) => dispatch({ type: "SET_COMPOSE_FILE", file })}
-              onLoadFromFile={loadComposeFromFile}
-              onLoadFromText={loadComposeFromText}
-              engine={state.engine}
-              busy={state.busy.loadingCompose}
-            />
-          )}
-
-          {state.mode === "full" && (
-            <FullWorkflowView
-              state={state}
-              dispatch={dispatch}
-              stepIndex={state.wizard.stepIndex}
-              maxEnabledIndex={maxEnabledIndex}
-              onBack={onBack}
-              onContinue={onContinue}
-              canContinue={canContinue}
-              downloadYaml={downloadYaml}
-              copyYaml={copyYaml}
-              fillMetadata={fillMetadata}
-              saveLLMSettings={saveLLMSettings}
-              renderStage2={renderStage2}
-              refreshExportYaml={refreshExportYaml}
-            />
-          )}
-
-          {state.mode === "quick" && (
-            <QuickEditView
-              engine={state.engine}
-              renderedYaml={state.renderedYaml}
-              onRefresh={refreshExportYaml}
-              onQuickUpdate={quickUpdateField}
-              onBackToLanding={backToLanding}
-              downloadYaml={downloadYaml}
-              copyYaml={copyYaml}
-              busy={{ exporting: state.busy.exporting, patchingField: state.busy.patchingField }}
-            />
-          )}
-
-          {showPostLoadChooser && (
-            <div
-              className="modalBackdrop modalBackdrop--animated"
-              role="dialog"
-              aria-modal="true"
-              aria-label="Choose workflow"
-            >
-              <div className="modalPanel modalPanel--animated" onClick={(event) => event.stopPropagation()}>
-                <Card>
-                  <CardHeader
-                    title="Choose workflow"
-                    subtitle="Pick the best flow for this file. You can always switch later."
+          <main className="content-area">
+            <div className="view-scroll-box">
+              <div className="view-container">
+                {state.mode === "landing" && (
+                  <LandingView
+                    mode={state.compose.mode}
+                    onModeChange={(m) => dispatch({ type: "SET_COMPOSE_MODE", mode: m })}
+                    composeText={state.compose.text}
+                    composeFile={state.compose.file}
+                    onComposeTextChange={(t) => dispatch({ type: "SET_COMPOSE_TEXT", text: t })}
+                    onComposeFileChange={(f) => dispatch({ type: "SET_COMPOSE_FILE", file: f })}
+                    onLoadFromFile={loadComposeFromFile}
+                    onLoadFromText={loadComposeFromText}
+                    engine={state.engine}
+                    busy={state.busy.loadingCompose}
                   />
-                  <CardBody>
-                    <div className="stack stack--md">
-                      {postLoadHasStage2 ? (
-                        <div className="banner banner--success">
-                          <div className="banner__title">x-casaos detected</div>
-                          <div className="banner__message">This looks like an already-edited CasaOS YAML.</div>
-                        </div>
-                      ) : (
-                        <div className="banner banner--warning">
-                          <div className="banner__title">No x-casaos detected</div>
-                          <div className="banner__message">This looks like a raw docker-compose.yml.</div>
-                        </div>
-                      )}
+                )}
 
-                      <div className="grid2">
-                        <div className="banner" style={{ cursor: "pointer" }} onClick={chooseFullWorkflow}>
-                          <div className="banner__title">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{ verticalAlign: "text-bottom", marginRight: 6 }}>
-                              <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                            </svg>
-                            Full Workflow
-                          </div>
-                          <div className="banner__message">
-                            Use Metadata (Params/LLM), Preview/Render, then Export.
-                          </div>
-                        </div>
-                        <div className="banner" style={{ cursor: "pointer" }} onClick={chooseQuickUpdate}>
-                          <div className="banner__title">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{ verticalAlign: "text-bottom", marginRight: 6 }}>
-                              <path d="M13 10V3L4 14h7v7l9-11h-7z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                            </svg>
-                            Quick Edit
-                          </div>
-                          <div className="banner__message">
-                            Patch a single field (multi-language sync) and export immediately.
-                          </div>
-                        </div>
-                      </div>
+                {state.mode === "full" && (
+                  <FullWorkflowView
+                    state={state}
+                    dispatch={dispatch}
+                    stepIndex={state.wizard.stepIndex}
+                    maxEnabledIndex={state.wizard.unlockedIndex}
+                    onStepChange={(idx) => dispatch({ type: "SET_STEP", stepIndex: idx })}
+                    saveLLMSettings={saveLLMSettings}
+                    fillMetadata={fillMetadata}
+                    renderStage2={renderStage2}
+                    refreshExportYaml={refreshExportYaml}
+                    downloadYaml={downloadYaml}
+                    copyYaml={copyYaml}
+                    onBack={onBack}
+                    onContinue={onContinue}
+                    canContinue={canContinue}
+                  />
+                )}
 
-                      <div className="row row--end row--wrap">
-                        <Button
-                          variant={postLoadHasStage2 ? "secondary" : "primary"}
-                          onClick={chooseFullWorkflow}
-                        >
-                          Full Workflow
-                        </Button>
-                        <Button
-                          variant={postLoadHasStage2 ? "primary" : "secondary"}
-                          onClick={chooseQuickUpdate}
-                        >
-                          Quick Edit
-                        </Button>
-                      </div>
-                    </div>
-                  </CardBody>
-                </Card>
+                {state.mode === "quick" && (
+                  <QuickEditView
+                    engine={state.engine}
+                    renderedYaml={state.renderedYaml}
+                    onQuickUpdate={quickUpdateField}
+                    onDownload={downloadYaml}
+                    onCopy={copyYaml}
+                    onRefreshExport={refreshExportYaml}
+                    busy={state.busy}
+                    backToLanding={backToLanding}
+                  />
+                )}
               </div>
             </div>
-          )}
+          </main>
 
           <ToastHost toasts={state.toasts} onDismiss={dismissToast} />
+
+          {showPostLoadChooser && (
+            <div className="modal-overlay">
+              <Card className="modal-card">
+                <CardHeader title="Choose Workflow" subtitle="Your compose file is loaded. Select your path." />
+                <CardBody>
+                  <div className="grid2">
+                    <button className="choice-box" onClick={chooseFullWorkflow}>
+                      <div className="choice-box__icon">🚀</div>
+                      <div className="choice-box__title">Full Workflow</div>
+                      <div className="choice-box__desc">Step-by-step metadata & preview.</div>
+                    </button>
+                    <button className="choice-box" onClick={chooseQuickUpdate}>
+                      <div className="choice-box__icon">⚡</div>
+                      <div className="choice-box__title">Quick Edit</div>
+                      <div className="choice-box__desc">Direct field patching.</div>
+                    </button>
+                  </div>
+                </CardBody>
+              </Card>
+            </div>
+          )}
         </div>
       );
     }

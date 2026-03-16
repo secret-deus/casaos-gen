@@ -208,10 +208,15 @@ class VersionManager:
 
         Raises:
             FileNotFoundError: 如果版本文件不存在
+            ValueError: 如果文件名格式不合法（防止路径遍历）
         """
+        from .utils import validate_version_filename
+
+        validate_version_filename(version_file)
         src = self.history_dir / version_file
         if not src.exists():
-            raise FileNotFoundError(f"版本文件不存在: {version_file}")
+            from .exceptions import VersionError
+            raise VersionError(f"版本文件不存在: {version_file}")
 
         # 备份当前版本（如果存在）
         if self.current_meta_file.exists():
