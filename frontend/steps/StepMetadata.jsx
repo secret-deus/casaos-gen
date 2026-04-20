@@ -240,8 +240,8 @@
 
           <Card>
             <CardHeader
-              title="LLM settings"
-              subtitle="Configure the model used for Stage 1 drafting. Settings are saved server-side for this workspace."
+              title="Stage 1 LLM settings"
+              subtitle="Configure the remote model used for Stage 1 drafting. Stage 2 translation always uses local LM Studio."
               actions={
                 <Button
                   variant="secondary"
@@ -320,8 +320,8 @@
                 </div>
 
                 <div className="inlineNotice">
-                  Current server config: model <strong>{engine?.llm?.model || "n/a"}</strong>, temp{" "}
-                  <strong>{engine?.llm?.temperature ?? "n/a"}</strong>
+                  Current Stage 1 server config: model <strong>{engine?.llm?.stage1?.model || engine?.llm?.model || "n/a"}</strong>, temp{" "}
+                  <strong>{engine?.llm?.stage1?.temperature ?? engine?.llm?.temperature ?? "n/a"}</strong>
                 </div>
               </div>
             </CardBody>

@@ -36,7 +36,7 @@
       return "";
     }
 
-    const listName = root.utils.SERVICE_LIST_MAP[fieldType];
+    const listName = (root.utils || {}).SERVICE_LIST_MAP?.[fieldType];
     if (!listName) {
       return "";
     }
@@ -47,7 +47,11 @@
   }
 
   function classifyTarget(target) {
-    const { APP_MULTILANG_FIELDS, APP_SINGLE_FIELDS, SERVICE_FIELD_TYPES } = root.utils;
+    const utils = root.utils || {};
+    const APP_MULTILANG_FIELDS = utils.APP_MULTILANG_FIELDS || new Set();
+    const APP_SINGLE_FIELDS = utils.APP_SINGLE_FIELDS || new Set();
+    const SERVICE_FIELD_TYPES = utils.SERVICE_FIELD_TYPES || new Set();
+
     const rawTarget = String(target || "").trim();
     if (!rawTarget) {
       return { kind: "invalid" };

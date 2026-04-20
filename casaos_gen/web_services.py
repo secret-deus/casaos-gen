@@ -18,9 +18,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import HTTPException, Request, Response
 
 from .i18n import DEFAULT_LANGUAGES, TRANSLATION_MAP
+from .llm_translate import LLMTranslationError, translate_items_with_llm
+from .lmstudio_client import build_llm_client
 from .models import CasaOSMeta
 from .pipeline import render_compose
-from .llm_translate import LLMTranslationError
 from .utils import as_text
 
 try:
@@ -31,18 +32,71 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 LLM_CONFIG_PATH = Path("llm_config.json")
+STAGE2_LMSTUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
+STAGE2_LMSTUDIO_API_KEY = "lm-studio"
+STAGE2_LMSTUDIO_MODEL = "qwen/qwen3.5-9b"
+STAGE2_LMSTUDIO_TEMPERATURE = 0.2
 
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
 
 @dataclass
-class LLMConfig:
-    """Global LLM configuration shared across all sessions."""
+class StageLLMConfig:
+    """LLM configuration for one pipeline stage."""
     base_url: Optional[str] = None
     api_key: Optional[str] = None
     model: str = "gpt-4.1-mini"
     temperature: float = 0.2
+
+
+def _default_stage2_config() -> StageLLMConfig:
+    return StageLLMConfig(
+        base_url=STAGE2_LMSTUDIO_BASE_URL,
+        api_key=STAGE2_LMSTUDIO_API_KEY,
+        model=STAGE2_LMSTUDIO_MODEL,
+        temperature=STAGE2_LMSTUDIO_TEMPERATURE,
+    )
+
+
+@dataclass
+class LLMConfig:
+    """Global stage-specific LLM configuration shared across all sessions."""
+    stage1: StageLLMConfig = field(default_factory=StageLLMConfig)
+    stage2: StageLLMConfig = field(default_factory=_default_stage2_config)
+
+    # Backward compatibility: top-level properties map to Stage 1.
+    @property
+    def base_url(self) -> Optional[str]:
+        return self.stage1.base_url
+
+    @base_url.setter
+    def base_url(self, value: Optional[str]) -> None:
+        self.stage1.base_url = value
+
+    @property
+    def api_key(self) -> Optional[str]:
+        return self.stage1.api_key
+
+    @api_key.setter
+    def api_key(self, value: Optional[str]) -> None:
+        self.stage1.api_key = value
+
+    @property
+    def model(self) -> str:
+        return self.stage1.model
+
+    @model.setter
+    def model(self, value: str) -> None:
+        self.stage1.model = value
+
+    @property
+    def temperature(self) -> float:
+        return self.stage1.temperature
+
+    @temperature.setter
+    def temperature(self, value: float) -> None:
+        self.stage1.temperature = value
 
 
 @dataclass
@@ -96,25 +150,49 @@ def get_session(request: Request, response: Response) -> SessionState:
 
 def safe_llm_config_dict() -> dict:
     """Return LLM config with api_key masked (never expose raw key via API)."""
+    stage1 = {
+        "base_url": LLM_CFG.stage1.base_url,
+        "api_key": bool(LLM_CFG.stage1.api_key),
+        "model": LLM_CFG.stage1.model,
+        "temperature": LLM_CFG.stage1.temperature,
+    }
+    stage2 = {
+        "base_url": LLM_CFG.stage2.base_url,
+        "api_key": bool(LLM_CFG.stage2.api_key),
+        "model": LLM_CFG.stage2.model,
+        "temperature": LLM_CFG.stage2.temperature,
+        "managed": "fixed-lmstudio",
+    }
     return {
-        "base_url": LLM_CFG.base_url,
-        "api_key": bool(LLM_CFG.api_key),
-        "model": LLM_CFG.model,
-        "temperature": LLM_CFG.temperature,
+        "base_url": stage1["base_url"],
+        "api_key": stage1["api_key"],
+        "model": stage1["model"],
+        "temperature": stage1["temperature"],
+        "stage1": stage1,
+        "stage2": stage2,
     }
 
 
-def require_llm_client():
-    """Build and return an OpenAI client from the global LLM config."""
+def _resolve_stage_config(stage: str = "stage1") -> StageLLMConfig:
+    key = str(stage or "stage1").strip().lower()
+    if key not in {"stage1", "stage2"}:
+        raise HTTPException(status_code=400, detail=f"Unknown LLM stage '{stage}'.")
+    return LLM_CFG.stage1 if key == "stage1" else LLM_CFG.stage2
+
+
+def require_llm_client(stage: str = "stage1"):
+    """Build and return an OpenAI client from the selected global LLM config."""
     if OpenAI is None:
         raise HTTPException(status_code=500, detail="openai package is not installed.")
-    client_kwargs = {}
-    if LLM_CFG.api_key:
-        client_kwargs["api_key"] = LLM_CFG.api_key
-    if LLM_CFG.base_url:
-        client_kwargs["base_url"] = LLM_CFG.base_url
+    cfg = _resolve_stage_config(stage)
     try:
-        return OpenAI(**client_kwargs)
+        return build_llm_client(
+            openai_cls=OpenAI,
+            api_key=cfg.api_key,
+            base_url=cfg.base_url,
+            timeout=90.0,
+            max_retries=0,
+        )
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=400, detail=f"Failed to initialize LLM client: {exc}") from exc
 
@@ -134,16 +212,29 @@ def parse_llm_json_response(content: str) -> Dict[str, Any]:
 
 def load_llm_config() -> None:
     """Load LLM config from disk."""
+    LLM_CFG.stage2 = _default_stage2_config()
     if LLM_CONFIG_PATH.exists():
         try:
             data = json.loads(LLM_CONFIG_PATH.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             logger.warning("Failed to parse llm_config.json")
             return
-        LLM_CFG.base_url = data.get("base_url")
-        LLM_CFG.api_key = data.get("api_key")
-        LLM_CFG.model = data.get("model", LLM_CFG.model)
-        LLM_CFG.temperature = data.get("temperature", LLM_CFG.temperature)
+
+        legacy = {
+            "base_url": data.get("base_url"),
+            "api_key": data.get("api_key"),
+            "model": data.get("model", LLM_CFG.stage1.model),
+            "temperature": data.get("temperature", LLM_CFG.stage1.temperature),
+        }
+        raw_stage1 = data.get("stage1")
+        stage1_data = raw_stage1 if isinstance(raw_stage1, dict) else legacy
+        LLM_CFG.stage1.base_url = stage1_data.get("base_url")
+        LLM_CFG.stage1.api_key = stage1_data.get("api_key")
+        LLM_CFG.stage1.model = stage1_data.get("model", LLM_CFG.stage1.model)
+        LLM_CFG.stage1.temperature = stage1_data.get("temperature", LLM_CFG.stage1.temperature)
+
+
+load_llm_config()
 
 
 def save_llm_config(
@@ -151,23 +242,30 @@ def save_llm_config(
     api_key: Optional[str],
     model: Optional[str],
     temperature: Optional[float],
+    stage: str = "stage1",
 ) -> None:
     """Save LLM config to disk and update global state."""
+    key = str(stage or "stage1").strip().lower()
+    if key != "stage1":
+        return
+    cfg = LLM_CFG.stage1
     if base_url is not None:
-        LLM_CFG.base_url = base_url or None
+        cfg.base_url = base_url or None
     if api_key is not None:
-        LLM_CFG.api_key = api_key or None
+        cfg.api_key = api_key or None
     if model is not None:
-        LLM_CFG.model = model or LLM_CFG.model
+        cfg.model = model or cfg.model
     if temperature is not None:
-        LLM_CFG.temperature = temperature
+        cfg.temperature = temperature
     LLM_CONFIG_PATH.write_text(
         json.dumps(
             {
-                "base_url": LLM_CFG.base_url,
-                "api_key": LLM_CFG.api_key,
-                "model": LLM_CFG.model,
-                "temperature": LLM_CFG.temperature,
+                "stage1": {
+                    "base_url": LLM_CFG.stage1.base_url,
+                    "api_key": LLM_CFG.stage1.api_key,
+                    "model": LLM_CFG.stage1.model,
+                    "temperature": LLM_CFG.stage1.temperature,
+                },
             },
             indent=2,
         ),
@@ -223,16 +321,17 @@ def ensure_stage2_structure(session: SessionState, require_meta: bool = False) -
             raise HTTPException(status_code=400, detail="Stage 1 metadata unavailable. Run Stage 1 first.")
         return
     try:
+        stage2_cfg = _resolve_stage_config("stage2")
         session.compose_data = render_compose(
             session.compose_data,
             session.meta,
             languages=session.languages,
             translation_map_override=session.translation_map,
             auto_translate=True,
-            llm_model=LLM_CFG.model,
-            llm_temperature=LLM_CFG.temperature,
-            llm_api_key=LLM_CFG.api_key,
-            llm_base_url=LLM_CFG.base_url,
+            llm_model=stage2_cfg.model,
+            llm_temperature=stage2_cfg.temperature,
+            llm_api_key=stage2_cfg.api_key,
+            llm_base_url=stage2_cfg.base_url,
         )
     except Exception as exc:
         logger.warning(
@@ -279,36 +378,21 @@ SOURCE_TEXT:
 
 def translate_multilang_with_llm(text: str, source_language: Optional[str], session: SessionState) -> Dict[str, str]:
     """Call LLM to translate *text* into all session languages."""
-    client = require_llm_client()
-    prompt = build_translation_prompt(text, session.languages, source_language)
-    temperature = max(0.0, min(float(LLM_CFG.temperature), 0.3))
+    stage2_cfg = _resolve_stage_config("stage2")
+    client = require_llm_client("stage2")
     try:
-        response = client.chat.completions.create(
-            model=LLM_CFG.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
+        results = translate_items_with_llm(
+            {"0": text},
+            session.languages,
+            model=stage2_cfg.model,
+            temperature=stage2_cfg.temperature,
+            client=client,
+            source_language=source_language,
         )
-    except Exception as exc:  # pragma: no cover
-        raise HTTPException(status_code=400, detail=f"LLM translation failed: {exc}") from exc
+    except LLMTranslationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    content = response.choices[0].message.content or ""
-    data = parse_llm_json_response(content)
-
-    translations: Dict[str, str] = {}
-    for lang in session.languages:
-        value = data.get(lang)
-        translations[lang] = "" if value is None else str(value)
-
-    if source_language and source_language in translations:
-        translations[source_language] = text
-
-    english_text = translations.get("en_US") or ""
-    for lang in session.languages:
-        if translations[lang].strip():
-            continue
-        translations[lang] = english_text.strip() or text
-
-    return translations
+    return results.get("0") or {lang: text for lang in session.languages}
 
 
 def update_translation_map_from_multilang(translations: Dict[str, str], session: SessionState) -> None:

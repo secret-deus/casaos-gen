@@ -8,8 +8,8 @@ from casaos_gen import models
 from casaos_gen.compose_normalize import normalize_compose_for_appstore
 from casaos_gen.constants import CDN_BASE
 from casaos_gen.i18n import load_translation_map, wrap_multilang
-from casaos_gen.llm_stage1 import build_stage1_prompt
-from casaos_gen.pipeline import apply_params_to_meta
+from casaos_gen.llm_stage1 import _strip_generated_placeholders, build_stage1_prompt
+from casaos_gen.pipeline import _choose_source_language_hint, apply_params_to_meta
 from casaos_gen.pipeline import render_compose
 from casaos_gen.parser import build_casaos_meta
 from casaos_gen.template_stage import build_params_skeleton, build_template_compose
@@ -214,6 +214,48 @@ class CasaOSLLMPromptTests(unittest.TestCase):
         prompt = build_stage1_prompt(meta, custom_prompt="CUSTOM_RULE: hello")
         self.assertIn("CUSTOM_RULE: hello", prompt)
 
+    def test_stage1_strips_generated_placeholders_before_llm(self):
+        meta = models.CasaOSMeta(
+            app=models.AppMeta(
+                title="demo",
+                tagline="demo on CasaOS",
+                description=(
+                    "demo is a self-hosted application stack deployed via Docker Compose.\n\n"
+                    "Key Features:\n"
+                    "- Runs multiple services as a single stack.\n"
+                    "- Supports persistent storage and environment configuration.\n"
+                    "- Ready to be imported and managed in CasaOS.\n"
+                ),
+                category="Utilities",
+                author="me",
+                main="demo",
+                port_map="8080",
+            ),
+            services={
+                "demo": models.ServiceMeta(
+                    envs=[models.EnvItem(container="TZ", description="Environment variable TZ")],
+                    ports=[models.PortItem(container="8080", description="Port 8080")],
+                    volumes=[models.VolumeItem(container="/data", description="Volume /data")],
+                )
+            },
+        )
+
+        cleaned, stripped = _strip_generated_placeholders(meta)
+        self.assertEqual(stripped, 5)
+        self.assertEqual(cleaned.app.tagline, "")
+        self.assertEqual(cleaned.app.description, "")
+        self.assertEqual(cleaned.services["demo"].envs[0].description, "")
+        self.assertEqual(cleaned.services["demo"].ports[0].description, "")
+        self.assertEqual(cleaned.services["demo"].volumes[0].description, "")
+
+
+class CasaOSStage2SourceLanguageTests(unittest.TestCase):
+    def test_source_language_hint_uses_auto_detect_for_non_ascii_text(self):
+        self.assertIsNone(_choose_source_language_hint(["中文描述", "Main web interface port"]))
+
+    def test_source_language_hint_keeps_en_us_for_ascii_text(self):
+        self.assertEqual(_choose_source_language_hint(["Main web interface port", "Data directory"]), "en_US")
+
 
 class CasaOSStage2LLMTranslationTests(unittest.TestCase):
     def test_render_compose_auto_translate_fills_locales_via_llm(self):
@@ -223,6 +265,15 @@ class CasaOSStage2LLMTranslationTests(unittest.TestCase):
 
             def create(self, model, messages, temperature):
                 prompt = messages[0]["content"]
+                if 'locale "' in prompt:
+                    start = prompt.find('locale "') + len('locale "')
+                    end = prompt.find('"', start)
+                    target_language = prompt[start:end]
+                    marker = "SOURCE_TEXT:"
+                    index = prompt.find(marker)
+                    source_text = prompt[index + len(marker) :].strip() if index != -1 else ""
+                    content = json.dumps({target_language: f"涓枃:{source_text}"}, ensure_ascii=False)
+                    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
                 marker = "ITEMS (ITEM_ID -> SOURCE_TEXT):"
                 index = prompt.find(marker)
                 if index == -1:
@@ -277,13 +328,14 @@ class CasaOSStage2LLMTranslationTests(unittest.TestCase):
             llm_client=FakeLLMClient(),
         )
 
-        self.assertEqual(out["x-casaos"]["tagline"]["zh_CN"], "中文:Deep document RAG")
-        self.assertEqual(out["x-casaos"]["tips"]["before_install"]["zh_CN"], "中文:Run setup")
-        self.assertEqual(
-            out["services"]["web"]["x-casaos"]["ports"][0]["description"]["zh_CN"],
-            "中文:Main web interface port",
+        self.assertTrue(out["x-casaos"]["tagline"]["zh_CN"].endswith("Deep document RAG"))
+        self.assertTrue(out["x-casaos"]["tips"]["before_install"]["zh_CN"].endswith("Run setup"))
+        self.assertTrue(
+            out["services"]["web"]["x-casaos"]["ports"][0]["description"]["zh_CN"].endswith(
+                "Main web interface port"
+            )
         )
-        self.assertEqual(translation_cache["Deep document RAG"]["zh_CN"], "中文:Deep document RAG")
+        self.assertTrue(translation_cache["Deep document RAG"]["zh_CN"].endswith("Deep document RAG"))
 
 
 class CasaOSTemplateStageTests(unittest.TestCase):

@@ -95,7 +95,7 @@ def extract_envs(service: Dict) -> List[EnvItem]:
 
         if key:
 
-            items.append(EnvItem(container=key))
+            items.append(EnvItem(container=key, description=f"Environment variable {key}"))
 
     return items
 
@@ -111,7 +111,7 @@ def extract_ports(service: Dict) -> List[PortItem]:
 
         if container:
 
-            items.append(PortItem(container=container))
+            items.append(PortItem(container=container, description=f"Port {container}"))
 
     return items
 
@@ -131,7 +131,7 @@ def extract_volumes(service: Dict) -> List[VolumeItem]:
 
         if container_path:
 
-            items.append(VolumeItem(container=container_path))
+            items.append(VolumeItem(container=container_path, description=f"Volume {container_path}"))
 
     return items
 

@@ -20,7 +20,8 @@
       rootNS.steps.ExportCard &&
       rootNS.views.LandingView &&
       rootNS.views.FullWorkflowView &&
-      rootNS.views.QuickEditView;
+      rootNS.views.QuickEditView &&
+      rootNS.views.SettingsView;
 
     if (!hasDeps) {
       window.setTimeout(bootstrap, 20);
@@ -31,12 +32,12 @@
     const { requestJSON, requestText } = rootNS.api;
     const { cx, uid, readFileAsText, copyToClipboard, clamp } = rootNS.utils;
     const { Button, IconButton, ToastHost, Card, CardHeader, CardBody } = rootNS.components;
-    const { LandingView, FullWorkflowView, QuickEditView } = rootNS.views;
+    const { LandingView, FullWorkflowView, QuickEditView, SettingsView } = rootNS.views;
 
     const TOAST_EXIT_MS = 250;
 
     const initialState = {
-      mode: "landing", // "landing" | "full" | "quick"
+      mode: "landing", // "landing" | "full" | "quick" | "settings"
       wizard: {
         stepIndex: 0, // 0-2 (3 steps: Metadata/Preview/Export)
         unlockedIndex: 0,
@@ -188,12 +189,14 @@
               ...nextState.llm,
               draft: {
                 ...nextState.llm.draft,
-                base_url: action.engine.llm.base_url || "",
-                model: action.engine.llm.model || nextState.llm.draft.model,
+                base_url: action.engine.llm?.stage1?.base_url || action.engine.llm.base_url || "",
+                model: action.engine.llm?.stage1?.model || action.engine.llm.model || nextState.llm.draft.model,
                 temperature:
-                  typeof action.engine.llm.temperature === "number"
-                    ? action.engine.llm.temperature
-                    : nextState.llm.draft.temperature,
+                  typeof action.engine.llm?.stage1?.temperature === "number"
+                    ? action.engine.llm.stage1.temperature
+                    : typeof action.engine.llm?.temperature === "number"
+                      ? action.engine.llm.temperature
+                      : nextState.llm.draft.temperature,
               },
             };
           }
@@ -460,6 +463,7 @@
         dispatch({ type: "SET_BUSY", key: "savingLLM", value: true });
         try {
           const formData = new FormData();
+          formData.append("stage", "stage1");
           formData.append("base_url", state.llm.draft.base_url || "");
           if (String(state.llm.draft.api_key || "").trim()) {
             formData.append("api_key", state.llm.draft.api_key.trim());
@@ -468,7 +472,7 @@
           formData.append("temperature", String(state.llm.draft.temperature ?? 0.2));
           await requestJSON("/api/llm", { method: "POST", body: formData });
           await syncUIState({ silent: true });
-          pushToast({ title: "Saved", message: "LLM settings updated.", variant: "success" });
+          pushToast({ title: "Saved", message: "Stage 1 LLM settings updated.", variant: "success" });
         } catch (error) {
           pushToast({ title: "LLM save failed", message: error.message, variant: "danger" });
         } finally {
@@ -476,10 +480,22 @@
         }
       };
 
+      const appendLLMRequestFields = (formData) => {
+        formData.append("model", state.llm.draft.model || "gpt-4.1-mini");
+        formData.append("temperature", String(state.llm.draft.temperature ?? 0.2));
+        if (String(state.llm.draft.base_url || "").trim()) {
+          formData.append("llm_base_url", state.llm.draft.base_url.trim());
+        }
+        if (String(state.llm.draft.api_key || "").trim()) {
+          formData.append("llm_api_key", state.llm.draft.api_key.trim());
+        }
+      };
+
       const renderStage2 = async ({ focusTab = true } = {}) => {
         dispatch({ type: "SET_BUSY", key: "rendering", value: true });
         try {
-          const renderResult = await requestJSON("/api/render", { method: "POST" });
+          const formData = new FormData();
+          const renderResult = await requestJSON("/api/render", { method: "POST", body: formData });
           const yamlText = await requestText("/api/export", { method: "POST" });
           dispatch({ type: "SET_RENDERED_YAML", value: yamlText });
           if (focusTab) {
@@ -510,20 +526,14 @@
           return;
         }
         dispatch({ type: "SET_BUSY", key: "fillingMeta", value: true });
+        const shouldAutoRender = Boolean(state.params.autoRenderAfterSave);
         try {
           const formData = new FormData();
           formData.append("use_llm", state.params.useLLM ? "true" : "false");
           formData.append("use_params", state.params.useParams ? "true" : "false");
 
           if (state.params.useLLM) {
-            formData.append("model", state.llm.draft.model || "gpt-4.1-mini");
-            formData.append("temperature", String(state.llm.draft.temperature ?? 0.2));
-            if (String(state.llm.draft.base_url || "").trim()) {
-              formData.append("llm_base_url", state.llm.draft.base_url.trim());
-            }
-            if (String(state.llm.draft.api_key || "").trim()) {
-              formData.append("llm_api_key", state.llm.draft.api_key.trim());
-            }
+            appendLLMRequestFields(formData);
           }
 
           if (state.params.useParams) {
@@ -541,16 +551,19 @@
           if (warnings.length) {
             pushToast({ title: "Metadata saved (LLM skipped)", message: warnings[0], variant: "warning", duration: 6500 });
           } else {
-            pushToast({ title: "Metadata saved", message: "Metadata updated successfully.", variant: "success" });
-          }
-
-          if (state.params.autoRenderAfterSave) {
-            await renderStage2({ focusTab: false });
+            pushToast({
+              title: "Metadata saved",
+              message: shouldAutoRender ? "Metadata updated. Rendering x-casaos in background." : "Metadata updated successfully.",
+              variant: "success",
+            });
           }
         } catch (error) {
           pushToast({ title: "Metadata failed", message: error.message, variant: "danger" });
         } finally {
           dispatch({ type: "SET_BUSY", key: "fillingMeta", value: false });
+        }
+        if (shouldAutoRender) {
+          void renderStage2({ focusTab: false });
         }
       };
 
@@ -596,7 +609,11 @@
         try {
           const nextValue = String(value ?? "");
 
-          const { APP_MULTILANG_FIELDS, APP_SINGLE_FIELDS, SERVICE_FIELD_TYPES } = root.utils;
+          const utils = rootNS.utils || {};
+          const APP_MULTILANG_FIELDS = utils.APP_MULTILANG_FIELDS || new Set();
+          const APP_SINGLE_FIELDS = utils.APP_SINGLE_FIELDS || new Set();
+          const SERVICE_FIELD_TYPES = utils.SERVICE_FIELD_TYPES || new Set();
+
           const targetParts = targetValue.split(":");
           const isAppTarget = targetValue.startsWith("app.");
           const isServiceMultilangTarget =
@@ -632,7 +649,7 @@
 
           const shouldUpdateMeta =
             Boolean(state.engine.has_meta) &&
-            ((isAppTarget && root.utils.APP_META_UPDATABLE_FIELDS.has(appFieldPath)) || isServiceMultilangTarget);
+            ((isAppTarget && (utils.APP_META_UPDATABLE_FIELDS || new Set()).has(appFieldPath)) || isServiceMultilangTarget);
           const shouldUpdateMetaValue = shouldUpdateMeta && !isMultilang;
 
           if (shouldUpdateMetaValue) {
@@ -764,7 +781,15 @@
       const modePillLabel =
         state.mode === "full" ? "Full Workflow"
           : state.mode === "quick" ? "Quick Edit"
-            : "Wizard";
+            : state.mode === "settings" ? "Settings"
+              : "Wizard";
+
+      const SettingsIcon = () => (
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+      );
 
       return (
         <div className="app-layout">
@@ -802,10 +827,9 @@
             </div>
 
             <div className="top-bar__right">
-              <div className="engine-status">
-                <div className={cx("status-dot", { "status-dot--online": state.engine.lastSyncedAt })}></div>
-                <span className="status-text">{state.engine.lastSyncedAt ? "Live" : "Offline"}</span>
-              </div>
+              <IconButton label="Settings" onClick={() => dispatch({ type: "SET_MODE", mode: "settings" })}>
+                <SettingsIcon />
+              </IconButton>
               <IconButton label="Sync" loading={state.busy.syncing} onClick={() => syncUIState()}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
                   <path d="M21 2v6h-6M3 22v-6h6M21 13a9 9 0 11-3-7.7L21 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
@@ -856,11 +880,21 @@
                     engine={state.engine}
                     renderedYaml={state.renderedYaml}
                     onQuickUpdate={quickUpdateField}
-                    onDownload={downloadYaml}
-                    onCopy={copyYaml}
-                    onRefreshExport={refreshExportYaml}
+                    downloadYaml={downloadYaml}
+                    copyYaml={copyYaml}
+                    onRefresh={refreshExportYaml}
                     busy={state.busy}
                     backToLanding={backToLanding}
+                  />
+                )}
+
+                {state.mode === "settings" && (
+                  <SettingsView
+                    llm={state.llm.draft}
+                    onFieldChange={(field, value) => dispatch({ type: "SET_LLM_DRAFT_FIELD", field, value })}
+                    onSave={saveLLMSettings}
+                    onBack={backToLanding}
+                    busy={state.busy.savingLLM}
                   />
                 )}
               </div>

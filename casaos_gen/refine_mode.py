@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Optional
 
+from .lmstudio_client import build_llm_client
 from .models import CasaOSMeta
 
 try:
@@ -79,12 +80,13 @@ def refine_user_inputs(
             raise LLMUnavailableError(
                 "openai package is not available. Install it or provide a custom client."
             )
-        client_kwargs = {}
-        if api_key:
-            client_kwargs["api_key"] = api_key
-        if base_url:
-            client_kwargs["base_url"] = base_url
-        client = OpenAI(**client_kwargs)
+        client = build_llm_client(
+            openai_cls=OpenAI,
+            api_key=api_key,
+            base_url=base_url,
+            timeout=90.0,
+            max_retries=0,
+        )
     
     prompt = build_refine_prompt(structure)
     logger.info("Calling LLM model %s for refining user inputs", model)

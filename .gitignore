@@ -46,3 +46,4 @@ llm_config.json
 # Local backups
 *.backup
 *.bak
+mail

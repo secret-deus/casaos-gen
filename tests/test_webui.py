@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -69,6 +70,8 @@ class TestGetState(unittest.TestCase):
             llm = data["llm"]
             # api_key should be a boolean, never the raw key
             self.assertIs(llm["api_key"], True)
+            self.assertIs(llm["stage1"]["api_key"], True)
+            self.assertIs(llm["stage2"]["api_key"], True)
             self.assertNotIn("sk-secret", json.dumps(data))
         finally:
             LLM_CFG.api_key = original_key
@@ -245,21 +248,106 @@ class TestExport(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
 
     def test_render_produces_compose(self):
-        resp = self.client.post("/api/render")
+        def fake_render_compose(compose_data, meta, **kwargs):
+            output = dict(compose_data)
+            output["x-casaos"] = {"title": {"en_US": meta.app.title or "web"}}
+            return output
+
+        with patch("casaos_gen.webui.render_compose", side_effect=fake_render_compose):
+            resp = self.client.post("/api/render")
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(data["status"], "ok")
         self.assertIn("x-casaos", data["compose"])
+
+    def test_render_uses_request_llm_overrides(self):
+        captured = {}
+
+        def fake_render_compose(compose_data, meta, **kwargs):
+            captured.update(kwargs)
+            output = dict(compose_data)
+            output["x-casaos"] = {"title": {"en_US": meta.app.title or "web"}}
+            return output
+
+        with patch("casaos_gen.webui.render_compose", side_effect=fake_render_compose):
+            resp = self.client.post(
+                "/api/render",
+                data={
+                    "model": "override-model",
+                    "temperature": "0.7",
+                    "llm_base_url": "https://example.invalid/v1",
+                    "llm_api_key": "sk-override",
+                },
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(captured["llm_model"], "override-model")
+        self.assertEqual(captured["llm_temperature"], 0.7)
+        self.assertEqual(captured["llm_base_url"], "https://example.invalid/v1")
+        self.assertEqual(captured["llm_api_key"], "sk-override")
+
+    def test_render_warning_includes_failure_reason(self):
+        calls = {"count": 0}
+
+        def flaky_render_compose(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("translation gateway timeout")
+            return {"x-casaos": {}, "services": {}}
+
+        with patch("casaos_gen.webui.render_compose", side_effect=flaky_render_compose):
+            resp = self.client.post("/api/render")
+
+        self.assertEqual(resp.status_code, 200)
+        warning = resp.json()["warnings"][0]
+        self.assertIn("Reason: translation gateway timeout", warning)
+
+    def test_render_uses_stage2_default_config(self):
+        captured = {}
+        orig_stage1 = (
+            LLM_CFG.stage1.model,
+            LLM_CFG.stage1.base_url,
+            LLM_CFG.stage1.api_key,
+            LLM_CFG.stage1.temperature,
+        )
+
+        def fake_render_compose(compose_data, meta, **kwargs):
+            captured.update(kwargs)
+            output = dict(compose_data)
+            output["x-casaos"] = {"title": {"en_US": meta.app.title or "web"}}
+            return output
+
+        LLM_CFG.stage1.model = "stage1-model"
+        LLM_CFG.stage1.base_url = "https://stage1.invalid/v1"
+        LLM_CFG.stage1.api_key = "sk-stage1"
+        LLM_CFG.stage1.temperature = 0.1
+        try:
+            with patch("casaos_gen.webui.render_compose", side_effect=fake_render_compose):
+                resp = self.client.post("/api/render")
+        finally:
+            LLM_CFG.stage1.model, LLM_CFG.stage1.base_url, LLM_CFG.stage1.api_key, LLM_CFG.stage1.temperature = orig_stage1
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(captured["llm_model"], "qwen/qwen3.5-9b")
+        self.assertEqual(captured["llm_temperature"], 0.2)
+        self.assertEqual(captured["llm_base_url"], "http://127.0.0.1:1234/v1")
+        self.assertEqual(captured["llm_api_key"], "lm-studio")
 
 
 class TestLLMConfig(unittest.TestCase):
     def setUp(self):
         _reset_sessions()
         self.client = TestClient(app)
+        self._cfg_path = Path("llm_config.json")
+        self._cfg_backup = self._cfg_path.read_text(encoding="utf-8") if self._cfg_path.exists() else None
         self._orig_model = LLM_CFG.model
         self._orig_key = LLM_CFG.api_key
         self._orig_url = LLM_CFG.base_url
         self._orig_temp = LLM_CFG.temperature
+        self._orig_stage2_model = LLM_CFG.stage2.model
+        self._orig_stage2_key = LLM_CFG.stage2.api_key
+        self._orig_stage2_url = LLM_CFG.stage2.base_url
+        self._orig_stage2_temp = LLM_CFG.stage2.temperature
 
     def tearDown(self):
         _reset_sessions()
@@ -267,6 +355,14 @@ class TestLLMConfig(unittest.TestCase):
         LLM_CFG.api_key = self._orig_key
         LLM_CFG.base_url = self._orig_url
         LLM_CFG.temperature = self._orig_temp
+        LLM_CFG.stage2.model = self._orig_stage2_model
+        LLM_CFG.stage2.api_key = self._orig_stage2_key
+        LLM_CFG.stage2.base_url = self._orig_stage2_url
+        LLM_CFG.stage2.temperature = self._orig_stage2_temp
+        if self._cfg_backup is None:
+            self._cfg_path.unlink(missing_ok=True)
+        else:
+            self._cfg_path.write_text(self._cfg_backup, encoding="utf-8")
 
     def test_set_llm_config(self):
         resp = self.client.post(
@@ -288,6 +384,25 @@ class TestLLMConfig(unittest.TestCase):
         data = resp.json()
         self.assertIs(data["llm"]["api_key"], True)
         self.assertNotIn("sk-secret", json.dumps(data))
+
+    def test_stage2_llm_config_is_fixed(self):
+        resp = self.client.post(
+            "/api/llm",
+            data={
+                "stage": "stage2",
+                "base_url": "https://example.invalid/v1",
+                "api_key": "sk-ignored",
+                "model": "ignored-model",
+                "temperature": "0.9",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["llm"]["stage2"]["model"], "qwen/qwen3.5-9b")
+        self.assertEqual(data["llm"]["stage2"]["temperature"], 0.2)
+        self.assertEqual(data["llm"]["stage2"]["base_url"], "http://127.0.0.1:1234/v1")
+        self.assertIs(data["llm"]["stage2"]["api_key"], True)
+        self.assertEqual(LLM_CFG.stage2.model, "qwen/qwen3.5-9b")
 
 
 class TestIndexPage(unittest.TestCase):

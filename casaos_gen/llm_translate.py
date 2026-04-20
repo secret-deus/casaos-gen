@@ -8,7 +8,16 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+
+from .constants import (
+    LLM_TRANSLATION_MAX_ATTEMPTS,
+    LLM_TRANSLATION_RETRY_BASE_DELAY_SECONDS,
+    OPENAI_MAX_RETRIES,
+    OPENAI_REQUEST_TIMEOUT_SECONDS,
+)
+from .lmstudio_client import build_llm_client
 
 try:
     from openai import OpenAI
@@ -72,6 +81,22 @@ ITEMS (ITEM_ID -> SOURCE_TEXT):
 """.strip()
 
 
+def build_single_locale_translation_prompt(
+    text: str,
+    target_language: str,
+    source_language: Optional[str],
+) -> str:
+    source_hint = f"Source locale: {source_language}." if source_language else "Detect source locale."
+    return (
+        f'Translate SOURCE_TEXT to locale "{target_language}". '
+        f'{source_hint} '
+        f'Return ONLY JSON: {{"{target_language}":"..."}}. '
+        "Preserve Markdown, links, product names, environment variable names, file paths, and port numbers. "
+        "No commentary.\n\n"
+        f"SOURCE_TEXT:\n{text}"
+    )
+
+
 def _ensure_llm_client(
     client: Optional[object],
     api_key: Optional[str],
@@ -81,12 +106,95 @@ def _ensure_llm_client(
         return client
     if OpenAI is None:
         raise LLMTranslationError("openai package is not available; cannot translate with LLM.")
-    client_kwargs: Dict[str, Any] = {}
-    if api_key:
-        client_kwargs["api_key"] = api_key
-    if base_url:
-        client_kwargs["base_url"] = base_url
-    return OpenAI(**client_kwargs)
+    return build_llm_client(
+        openai_cls=OpenAI,
+        api_key=api_key,
+        base_url=base_url,
+        timeout=OPENAI_REQUEST_TIMEOUT_SECONDS,
+        max_retries=OPENAI_MAX_RETRIES,
+    )
+
+
+def _normalize_languages(languages: Sequence[str]) -> List[str]:
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for raw in languages:
+        lang = str(raw or "").strip()
+        if not lang or lang in seen:
+            continue
+        seen.add(lang)
+        normalized.append(lang)
+    return normalized
+
+
+def _request_single_locale_translation(
+    llm_client: object,
+    text: str,
+    target_language: str,
+    *,
+    model: str,
+    temperature: float,
+    source_language: Optional[str],
+    max_attempts: int,
+    retry_base_delay_seconds: float,
+) -> str:
+    prompt = build_single_locale_translation_prompt(text, target_language, source_language)
+    safe_temperature = max(0.0, min(float(temperature), 0.3))
+    max_tokens = 384 if ("\n" in text or "\r" in text or len(text) > 220) else 96
+    attempts = max(1, int(max_attempts))
+    base_delay = max(0.0, float(retry_base_delay_seconds))
+
+    for attempt in range(1, attempts + 1):
+        try:
+            logger.info(
+                "Calling LLM model %s for single-locale translation (%s, attempt %d/%d)",
+                model,
+                target_language,
+                attempt,
+                attempts,
+            )
+            try:
+                response = llm_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=safe_temperature,
+                    max_tokens=max_tokens,
+                )
+            except TypeError as exc:
+                if "max_tokens" not in str(exc):
+                    raise
+                response = llm_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=safe_temperature,
+                )
+            content = response.choices[0].message.content or ""
+            data = _parse_json_object(content)
+            value = data.get(target_language)
+            if value is None:
+                return ""
+            return str(value)
+        except Exception as exc:  # pragma: no cover - network/model errors
+            if isinstance(exc, LLMTranslationError):
+                error = exc
+            else:
+                error = LLMTranslationError(f"LLM translation failed: {exc}")
+            if attempt >= attempts:
+                raise error
+
+            delay = base_delay * (2 ** (attempt - 1))
+            logger.warning(
+                "Single-locale translation attempt %d/%d failed for %s; retrying in %.1fs: %s",
+                attempt,
+                attempts,
+                target_language,
+                delay,
+                error,
+            )
+            if delay > 0:
+                time.sleep(delay)
+
+    raise LLMTranslationError("Single-locale translation failed without a concrete error.")
 
 
 def translate_items_with_llm(
@@ -99,49 +207,46 @@ def translate_items_with_llm(
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     source_language: Optional[str] = "en_US",
+    max_attempts: int = LLM_TRANSLATION_MAX_ATTEMPTS,
+    retry_base_delay_seconds: float = LLM_TRANSLATION_RETRY_BASE_DELAY_SECONDS,
 ) -> Dict[str, Dict[str, str]]:
-    """Translate a batch of strings via an OpenAI-compatible Chat Completions API."""
+    """Translate strings via repeated single-field, single-locale requests."""
 
-    normalized_languages = [str(lang) for lang in languages if str(lang).strip()]
+    normalized_languages = _normalize_languages(languages)
     if not normalized_languages:
         raise ValueError("languages must not be empty")
 
-    prompt = build_translation_prompt(items, normalized_languages, source_language)
-    safe_temperature = max(0.0, min(float(temperature), 0.3))
     llm_client = _ensure_llm_client(client, api_key=api_key, base_url=base_url)
-
-    try:
-        response = llm_client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=safe_temperature,
-        )
-    except Exception as exc:  # pragma: no cover - network/model errors
-        raise LLMTranslationError(f"LLM translation failed: {exc}") from exc
-
-    content = response.choices[0].message.content or ""
-    data = _parse_json_object(content)
 
     results: Dict[str, Dict[str, str]] = {}
     for item_id, source_text in items.items():
-        raw_entry = data.get(item_id)
-        if not isinstance(raw_entry, dict):
-            raw_entry = {}
-
-        translations: Dict[str, str] = {}
-        for lang in normalized_languages:
-            value = raw_entry.get(lang)
-            translations[lang] = "" if value is None else str(value)
-
-        if source_language and source_language in translations:
+        translations = {lang: "" for lang in normalized_languages}
+        if source_language and source_language in normalized_languages:
             translations[source_language] = str(source_text)
+        fallback_text = str(source_text)
+        english_fallback = str(source_text)
+        for lang in normalized_languages:
+            if source_language and lang == source_language:
+                continue
+            translated = _request_single_locale_translation(
+                llm_client,
+                str(source_text),
+                lang,
+                model=model,
+                temperature=temperature,
+                source_language=source_language,
+                max_attempts=max_attempts,
+                retry_base_delay_seconds=retry_base_delay_seconds,
+            )
+            translations[lang] = translated.strip() or fallback_text
+            if lang == "en_US" and translations[lang].strip():
+                english_fallback = translations[lang]
 
         fallback_text = translations.get("en_US") or str(source_text)
         for lang in normalized_languages:
             if str(translations.get(lang) or "").strip():
                 continue
-            translations[lang] = str(fallback_text)
-
+            translations[lang] = str(english_fallback or fallback_text)
         results[str(item_id)] = translations
 
     return results
@@ -197,9 +302,11 @@ def translate_texts_with_llm(
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     source_language: Optional[str] = "en_US",
-    short_text_max_chars: int = 200,
-    batch_max_items: int = 12,
-    batch_max_chars: int = 2500,
+    short_text_max_chars: int = 160,
+    batch_max_items: int = 4,
+    batch_max_chars: int = 1200,
+    max_attempts: int = LLM_TRANSLATION_MAX_ATTEMPTS,
+    retry_base_delay_seconds: float = LLM_TRANSLATION_RETRY_BASE_DELAY_SECONDS,
 ) -> Dict[str, Dict[str, str]]:
     """Translate many strings while reducing the number of LLM calls.
 
@@ -235,6 +342,8 @@ def translate_texts_with_llm(
                 api_key=api_key,
                 base_url=base_url,
                 source_language=source_language,
+                max_attempts=max_attempts,
+                retry_base_delay_seconds=retry_base_delay_seconds,
             )
             for item_id, source_text in items.items():
                 out[source_text] = chunk_result.get(item_id) or {str(lang): source_text for lang in languages}
@@ -254,6 +363,8 @@ def translate_texts_with_llm(
                 api_key=api_key,
                 base_url=base_url,
                 source_language=source_language,
+                max_attempts=max_attempts,
+                retry_base_delay_seconds=retry_base_delay_seconds,
             )
             out[text] = chunk_result.get("0") or {str(lang): text for lang in languages}
         except LLMTranslationError as exc:
@@ -264,4 +375,3 @@ def translate_texts_with_llm(
         raise LLMTranslationError(f"All translation batches failed: {errors[0]}")
 
     return out
-

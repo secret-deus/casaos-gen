@@ -58,11 +58,48 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 INDEX_HTML = FRONTEND_DIR / "index.html"
+LOG_DIR = BASE_DIR / ".casaos-gen" / "logs"
+WEBUI_LOG_PATH = LOG_DIR / "webui.log"
 
 app = FastAPI(title="CasaOS Compose Generator UI")
 
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
+
+def configure_web_logging() -> None:
+    """Ensure webui/backend logs are visible in terminal and persisted to disk."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    has_console = any(
+        isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
+        for handler in root_logger.handlers
+    )
+    if not has_console:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
+
+    target_log = str(WEBUI_LOG_PATH.resolve())
+    has_file = any(
+        isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", "") == target_log
+        for handler in root_logger.handlers
+    )
+    if not has_file:
+        file_handler = logging.FileHandler(WEBUI_LOG_PATH, encoding="utf-8")
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
+    logging.getLogger("casaos_gen").setLevel(logging.INFO)
+    logging.getLogger("uvicorn.error").setLevel(logging.INFO)
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 # ---------------------------------------------------------------------------
@@ -308,12 +345,13 @@ async def get_state(session: SessionState = Depends(get_session)) -> dict:
 
 @app.post("/api/llm")
 async def set_llm_config_endpoint(
+    stage: str = Form("stage1"),
     base_url: Optional[str] = Form(None),
     api_key: Optional[str] = Form(None),
     model: Optional[str] = Form(None),
     temperature: Optional[float] = Form(None),
 ) -> dict:
-    save_llm_config(base_url, api_key, model, temperature)
+    save_llm_config(base_url, api_key, model, temperature, stage=stage)
     return {"status": "ok", "llm": safe_llm_config_dict()}
 
 
@@ -383,6 +421,16 @@ async def fill_metadata(
         if use_params_value is None:
             use_params_value = False
 
+    logger.info(
+        "Stage 1 fill requested (use_llm=%s, use_params=%s, model=%s, temp=%s, llm_base_url=%s, llm_api_key=%s)",
+        use_llm_value,
+        use_params_value,
+        model or LLM_CFG.stage1.model,
+        temperature if temperature is not None else LLM_CFG.stage1.temperature,
+        bool((llm_base_url or "").strip()),
+        bool((llm_api_key or "").strip() or LLM_CFG.stage1.api_key),
+    )
+
     if not use_llm_value and not use_params_value:
         meta = session.meta or build_meta(session.compose_data)
         session.meta = meta
@@ -417,15 +465,15 @@ async def fill_metadata(
         meta = apply_params_to_meta(meta, params)
 
     if use_llm_value:
-        model_name = model or LLM_CFG.model
-        temp_value = LLM_CFG.temperature if temperature is None else temperature
+        model_name = model or LLM_CFG.stage1.model
+        temp_value = LLM_CFG.stage1.temperature if temperature is None else temperature
         try:
             meta = fill_meta_with_llm(
                 meta,
                 model=model_name,
                 temperature=temp_value,
-                api_key=llm_api_key or LLM_CFG.api_key,
-                base_url=llm_base_url or LLM_CFG.base_url,
+                api_key=llm_api_key or LLM_CFG.stage1.api_key,
+                base_url=llm_base_url or LLM_CFG.stage1.base_url,
                 prompt_instructions=llm_prompt,
             )
         except Exception as exc:  # pragma: no cover
@@ -450,12 +498,30 @@ async def fill_metadata(
 
 
 @app.post("/api/render")
-async def render_stage2(session: SessionState = Depends(get_session)) -> dict:
+async def render_stage2(
+    model: Optional[str] = Form(None),
+    temperature: Optional[float] = Form(None),
+    llm_base_url: Optional[str] = Form(None),
+    llm_api_key: Optional[str] = Form(None),
+    session: SessionState = Depends(get_session),
+) -> dict:
     if session.compose_data is None:
         raise HTTPException(status_code=400, detail="No compose file loaded.")
     if session.meta is None:
         raise HTTPException(status_code=400, detail="Stage 1 metadata unavailable.")
     warnings: List[str] = []
+    model_name = model or LLM_CFG.stage2.model
+    temp_value = LLM_CFG.stage2.temperature if temperature is None else temperature
+    api_key_value = llm_api_key or LLM_CFG.stage2.api_key
+    base_url_value = llm_base_url or LLM_CFG.stage2.base_url
+    logger.info(
+        "Stage 2 render requested (model=%s, temp=%s, llm_base_url=%s, llm_api_key=%s, locales=%d)",
+        model_name,
+        temp_value,
+        bool((base_url_value or "").strip()),
+        bool(api_key_value),
+        len(session.languages),
+    )
     try:
         session.compose_data = render_compose(
             session.compose_data,
@@ -463,10 +529,10 @@ async def render_stage2(session: SessionState = Depends(get_session)) -> dict:
             languages=session.languages,
             translation_map_override=session.translation_map,
             auto_translate=True,
-            llm_model=LLM_CFG.model,
-            llm_temperature=LLM_CFG.temperature,
-            llm_api_key=LLM_CFG.api_key,
-            llm_base_url=LLM_CFG.base_url,
+            llm_model=model_name,
+            llm_temperature=temp_value,
+            llm_api_key=api_key_value,
+            llm_base_url=base_url_value,
         )
     except Exception as exc:
         logger.warning(
@@ -474,7 +540,8 @@ async def render_stage2(session: SessionState = Depends(get_session)) -> dict:
             exc,
         )
         warnings.append(
-            "LLM unavailable; rendered Stage 2 without auto-translation (other locales will copy en_US unless present in the translation table)."
+            "LLM unavailable; rendered Stage 2 without auto-translation "
+            f"(other locales will copy en_US unless present in the translation table). Reason: {exc}"
         )
         session.compose_data = render_compose(
             session.compose_data,
@@ -625,9 +692,9 @@ async def assistant_chat(payload: AssistantChatRequest, session: SessionState = 
     chat_messages.extend({"role": msg.role, "content": msg.content} for msg in payload.messages)
     try:
         response = client.chat.completions.create(
-            model=LLM_CFG.model,
+            model=LLM_CFG.stage1.model,
             messages=chat_messages,
-            temperature=LLM_CFG.temperature,
+            temperature=LLM_CFG.stage1.temperature,
         )
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=400, detail=f"LLM request failed: {exc}") from exc
@@ -654,8 +721,10 @@ async def export_compose(session: SessionState = Depends(get_session)) -> PlainT
 
 def run(host: str = "127.0.0.1", port: int = 8001) -> None:
     """Launch the FastAPI web UI using uvicorn."""
+    configure_web_logging()
     logger.info("Starting CasaOS web UI on %s:%s", host, port)
-    uvicorn.run("casaos_gen.webui:app", host=host, port=port, reload=False)
+    logger.info("Backend log file: %s", WEBUI_LOG_PATH)
+    uvicorn.run("casaos_gen.webui:app", host=host, port=port, reload=False, log_level="info", access_log=True)
 
 
 if __name__ == "__main__":  # pragma: no cover

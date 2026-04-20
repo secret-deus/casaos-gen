@@ -275,10 +275,9 @@ def _ensure_main_service_port_map(data: Dict[str, Any], main_service: str) -> No
 
     if (
         (not published)
-        or (published == target_text)
         or (not published.isdigit())
         or int(published) <= 0
-        or int(published) >= 30000
+        or int(published) > 65535
     ):
         allocated = _allocate_random_port(rng, used_ports)
         primary["published"] = str(allocated)

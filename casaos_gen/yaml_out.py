@@ -38,12 +38,9 @@ _CasaOSYamlDumper.add_representer(CasaOSQuotedStr, _represent_casaos_quoted_str)
 
 
 def _represent_multiline_str(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:
-    """Prefer literal block scalars for multi-line strings.
-
-    This keeps long x-casaos descriptions readable (no '\\n\\' wrapping from double-quoted YAML scalars).
-    """
+    """Prefer literal block scalars for multi-line strings."""
     if "\n" in data or "\r" in data:
-        normalized = data.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = data.replace("\r\n", "\n").replace("\r", "\n").rstrip()
         return dumper.represent_scalar("tag:yaml.org,2002:str", normalized, style="|")
     return SafeRepresenter.represent_str(dumper, data)
 

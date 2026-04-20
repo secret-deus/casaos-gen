@@ -320,6 +320,16 @@ def _missing_languages(
     return missing
 
 
+def _choose_source_language_hint(texts: List[str]) -> Optional[str]:
+    """Use en_US only when every candidate already looks ASCII/English-ish."""
+    normalized = [str(text or "").strip() for text in texts if str(text or "").strip()]
+    if not normalized:
+        return "en_US"
+    if all(text.isascii() for text in normalized):
+        return "en_US"
+    return None
+
+
 def _build_translation_map_with_llm(
     compose_data: Dict[str, Any],
     meta: CasaOSMeta,
@@ -352,6 +362,7 @@ def _build_translation_map_with_llm(
     ]
     if not needed:
         return translation_map
+    source_language = _choose_source_language_hint(needed)
 
     translations_by_text = translate_texts_with_llm(
         needed,
@@ -361,7 +372,7 @@ def _build_translation_map_with_llm(
         client=client,
         api_key=api_key,
         base_url=base_url,
-        source_language="en_US",
+        source_language=source_language,
     )
 
     for english_text, translations in translations_by_text.items():
