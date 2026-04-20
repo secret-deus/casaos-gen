@@ -22,8 +22,15 @@ from .infer import (
     collect_port_pairs,
     infer_author,
     infer_category,
+    infer_docs,
     infer_main_port,
     infer_main_service,
+    infer_release_notes,
+    infer_repo,
+    infer_support,
+    infer_update_at,
+    infer_version,
+    infer_website,
 )
 from .models import AppMeta, CasaOSMeta, EnvItem, PortItem, ServiceMeta, VolumeItem
 
@@ -191,6 +198,20 @@ def build_casaos_meta(compose_data: Dict) -> CasaOSMeta:
 
     author = infer_author(services_copy, preferred_service=main_service)
 
+    version = infer_version(services_copy, preferred_service=main_service)
+
+    update_at = infer_update_at(services_copy, preferred_service=main_service)
+
+    release_notes = infer_release_notes(services_copy, preferred_service=main_service)
+
+    website = infer_website(services_copy, preferred_service=main_service)
+
+    repo = infer_repo(services_copy, preferred_service=main_service)
+
+    support = infer_support(services_copy, preferred_service=main_service)
+
+    docs = infer_docs(services_copy, preferred_service=main_service)
+
     title = str(compose_data.get("name") or main_service or "").strip() or main_service
     tagline = f"{title} on CasaOS"
     description = (
@@ -223,6 +244,13 @@ def build_casaos_meta(compose_data: Dict) -> CasaOSMeta:
         icon=icon,
         thumbnail=thumbnail,
         screenshot_link=screenshot_links,
+        version=version,
+        updateAt=update_at,
+        releaseNotes=release_notes,
+        website=website,
+        repo=repo,
+        support=support,
+        docs=docs,
 
     )
 
@@ -273,7 +301,7 @@ def build_xcasaos_template(compose_data: Dict, languages: List[str]) -> Dict:
     if not isinstance(app_block, dict):
         app_block = {}
     app_multis = {}
-    for field in ("title", "tagline", "description"):
+    for field in ("title", "tagline", "description", "releaseNotes"):
         app_multis[field] = _normalize_multilang(app_block.get(field), languages)
     app_singles_defaults = {
         "category": "",
@@ -283,6 +311,12 @@ def build_xcasaos_template(compose_data: Dict, languages: List[str]) -> Dict:
         "icon": "",
         "thumbnail": "",
         "screenshot_link": [],
+        "version": "",
+        "updateAt": "",
+        "website": "",
+        "repo": "",
+        "support": "",
+        "docs": "",
         "index": "/",
         "main": "",
         "port_map": "",
@@ -295,7 +329,7 @@ def build_xcasaos_template(compose_data: Dict, languages: List[str]) -> Dict:
     preserved = {
         key: value
         for key, value in app_block.items()
-        if key not in {"title", "tagline", "description", *app_singles_defaults.keys()}
+        if key not in {"title", "tagline", "description", "releaseNotes", *app_singles_defaults.keys()}
     }
     data["x-casaos"] = {**preserved, **app_multis, **app_singles}
 

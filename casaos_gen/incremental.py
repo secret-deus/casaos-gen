@@ -217,12 +217,26 @@ def apply_params_to_meta(meta: CasaOSMeta, params: Dict) -> CasaOSMeta:
         meta.app.tagline = app_params["tagline"]
     if app_params.get("description"):
         meta.app.description = app_params["description"]
+    if app_params.get("releaseNotes"):
+        meta.app.releaseNotes = app_params["releaseNotes"]
     if app_params.get("category"):
         meta.app.category = app_params["category"]
     if app_params.get("author"):
         meta.app.author = app_params["author"]
     if app_params.get("developer"):
         meta.app.developer = app_params["developer"]
+    if app_params.get("version"):
+        meta.app.version = app_params["version"]
+    if app_params.get("updateAt"):
+        meta.app.updateAt = app_params["updateAt"]
+    if app_params.get("website"):
+        meta.app.website = app_params["website"]
+    if app_params.get("repo"):
+        meta.app.repo = app_params["repo"]
+    if app_params.get("support"):
+        meta.app.support = app_params["support"]
+    if app_params.get("docs"):
+        meta.app.docs = app_params["docs"]
     if app_params.get("icon"):
         meta.app.icon = app_params["icon"]
     if app_params.get("thumbnail"):

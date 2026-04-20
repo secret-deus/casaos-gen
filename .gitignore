@@ -18,6 +18,8 @@ env/
 # Build outputs
 build/
 dist/
+web/node_modules/
+web/dist/
 *.egg-info/
 
 # Tooling caches

@@ -146,6 +146,20 @@
                       disabled={!hasCompose}
                     />
                   </Field>
+                  <Field
+                    id="releaseNotes"
+                    label="Release notes"
+                    hint="Optional. Stored as plain text in metadata and expanded to all locales during Stage 2."
+                  >
+                    <Textarea
+                      id="releaseNotes"
+                      value={metadataDraft.releaseNotes}
+                      onChange={(event) => onMetadataFieldChange?.("releaseNotes", event.target.value)}
+                      placeholder="First release"
+                      rows={4}
+                      disabled={!hasCompose}
+                    />
+                  </Field>
                 </div>
 
                 <div className="section">
@@ -205,6 +219,66 @@
                         value={metadataDraft.index}
                         onChange={(event) => onMetadataFieldChange?.("index", event.target.value)}
                         placeholder="/"
+                        disabled={!hasCompose}
+                      />
+                    </Field>
+                  </div>
+                </div>
+
+                <div className="section">
+                  <div className="section__title">Store metadata</div>
+                  <div className="grid2">
+                    <Field id="version" label="Version">
+                      <Input
+                        id="version"
+                        value={metadataDraft.version}
+                        onChange={(event) => onMetadataFieldChange?.("version", event.target.value)}
+                        placeholder="1.0.0"
+                        disabled={!hasCompose}
+                      />
+                    </Field>
+                    <Field id="updateAt" label="Update date">
+                      <Input
+                        id="updateAt"
+                        value={metadataDraft.updateAt}
+                        onChange={(event) => onMetadataFieldChange?.("updateAt", event.target.value)}
+                        placeholder="2026-03-01"
+                        disabled={!hasCompose}
+                      />
+                    </Field>
+                    <Field id="website" label="Website">
+                      <Input
+                        id="website"
+                        value={metadataDraft.website}
+                        onChange={(event) => onMetadataFieldChange?.("website", event.target.value)}
+                        placeholder="https://example.com"
+                        disabled={!hasCompose}
+                      />
+                    </Field>
+                    <Field id="repo" label="Repository">
+                      <Input
+                        id="repo"
+                        value={metadataDraft.repo}
+                        onChange={(event) => onMetadataFieldChange?.("repo", event.target.value)}
+                        placeholder="https://github.com/example/app"
+                        disabled={!hasCompose}
+                      />
+                    </Field>
+                    <Field id="support" label="Support">
+                      <Input
+                        id="support"
+                        value={metadataDraft.support}
+                        onChange={(event) => onMetadataFieldChange?.("support", event.target.value)}
+                        placeholder="https://github.com/example/app/issues"
+                        disabled={!hasCompose}
+                      />
+                    </Field>
+                    <Field id="docs" label="Docs">
+                      <Input
+                        id="docs"
+                        value={metadataDraft.docs}
+                        onChange={(event) => onMetadataFieldChange?.("docs", event.target.value)}
+                        placeholder="https://docs.example.com"
                         disabled={!hasCompose}
                       />
                     </Field>

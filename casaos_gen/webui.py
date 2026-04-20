@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional
 
@@ -56,15 +57,32 @@ LLMConfig = type(LLM_CFG)
 
 logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent.parent
-FRONTEND_DIR = BASE_DIR / "frontend"
-INDEX_HTML = FRONTEND_DIR / "index.html"
+LEGACY_FRONTEND_DIR = BASE_DIR / "frontend"
+MODERN_FRONTEND_DIST_DIR = BASE_DIR / "web" / "dist"
+LEGACY_INDEX_HTML = LEGACY_FRONTEND_DIR / "index.html"
+MODERN_INDEX_HTML = MODERN_FRONTEND_DIST_DIR / "index.html"
 LOG_DIR = BASE_DIR / ".casaos-gen" / "logs"
 WEBUI_LOG_PATH = LOG_DIR / "webui.log"
 
+
+def _resolve_frontend_index() -> Path:
+    mode = os.getenv("CASAOS_WEBUI_FRONTEND", "auto").strip().lower()
+    if mode == "legacy":
+        return LEGACY_INDEX_HTML
+    if mode == "modern":
+        return MODERN_INDEX_HTML if MODERN_INDEX_HTML.exists() else LEGACY_INDEX_HTML
+    return MODERN_INDEX_HTML if MODERN_INDEX_HTML.exists() else LEGACY_INDEX_HTML
+
+
+INDEX_HTML = _resolve_frontend_index()
+
 app = FastAPI(title="CasaOS Compose Generator UI")
 
-if FRONTEND_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+if LEGACY_FRONTEND_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(LEGACY_FRONTEND_DIR)), name="static")
+
+if (MODERN_FRONTEND_DIST_DIR / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=str(MODERN_FRONTEND_DIST_DIR / "assets")), name="assets")
 
 
 def configure_web_logging() -> None:
@@ -155,7 +173,7 @@ def _load_index_html() -> str:
     <title>CasaOS Compose UI</title>
   </head>
   <body>
-    <p>Frontend assets are missing. Please build the UI under the frontend/ directory.</p>
+    <p>Frontend assets are missing. Build the UI under the web/ directory or use the legacy frontend/ assets.</p>
   </body>
 </html>
 """.strip()
@@ -234,7 +252,7 @@ def _update_stage2_multi_field(payload: Stage2MultiUpdate, session: SessionState
             translations = {lang: payload.value for lang in session.languages}
             warnings.append("LLM unavailable; copied input to all locales (no translation performed).")
         sync_meta_from_multilang_target(payload.target, translations, session)
-        if payload.target in {"app.title", "app.tagline", "app.description"} or payload.target.startswith("service:"):
+        if payload.target in {"app.title", "app.tagline", "app.description", "app.releaseNotes"} or payload.target.startswith("service:"):
             update_translation_map_from_multilang(translations, session)
 
     if payload.target.startswith("app."):
@@ -340,7 +358,17 @@ async def get_state(session: SessionState = Depends(get_session)) -> dict:
         "has_stage2": bool(session.compose_data and session.compose_data.get("x-casaos")),
         "meta": session.meta.model_dump() if session.meta else None,
         "llm": safe_llm_config_dict(),
+        "compose_text": session.compose_text or "",
     }
+
+
+@app.post("/api/reset")
+async def reset_state(session: SessionState = Depends(get_session)) -> dict:
+    session.compose_data = None
+    session.compose_text = None
+    session.meta = None
+    session.translation_map = {}
+    return {"status": "ok"}
 
 
 @app.post("/api/llm")
@@ -601,6 +629,7 @@ async def upload_compose(
             "title": wrap_multilang(meta.app.title, session.languages, session.translation_map),
             "tagline": wrap_multilang(meta.app.tagline, session.languages, session.translation_map),
             "description": wrap_multilang(meta.app.description, session.languages, session.translation_map),
+            "releaseNotes": wrap_multilang(meta.app.releaseNotes, session.languages, session.translation_map),
         }
 
     session.compose_data = template_compose
@@ -663,7 +692,7 @@ async def update_meta_field(payload: FieldUpdate, session: SessionState = Depend
         propagate_translation(payload.value, session)
     if payload.sync_stage2 and session.compose_data and isinstance(session.compose_data.get("x-casaos"), dict):
         app_x = session.compose_data["x-casaos"]
-        if payload.target in ("app.title", "app.tagline", "app.description"):
+        if payload.target in ("app.title", "app.tagline", "app.description", "app.releaseNotes"):
             attr_name = payload.target.split(".", 1)[1]
             app_x[attr_name] = wrap_multilang(payload.value, session.languages, session.translation_map)
     return {"status": "ok", "meta": meta.model_dump()}
@@ -724,6 +753,7 @@ def run(host: str = "127.0.0.1", port: int = 8001) -> None:
     configure_web_logging()
     logger.info("Starting CasaOS web UI on %s:%s", host, port)
     logger.info("Backend log file: %s", WEBUI_LOG_PATH)
+    logger.info("Serving frontend entry: %s", INDEX_HTML)
     uvicorn.run("casaos_gen.webui:app", host=host, port=port, reload=False, log_level="info", access_log=True)
 
 

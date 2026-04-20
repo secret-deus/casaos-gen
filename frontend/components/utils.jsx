@@ -134,12 +134,14 @@
   }
 
   /* ─── Field classification constants (shared by app.jsx and StepExport.jsx) ─── */
-  const APP_MULTILANG_FIELDS = new Set(["title", "tagline", "description"]);
+  const APP_MULTILANG_FIELDS = new Set(["title", "tagline", "description", "releaseNotes"]);
   const APP_SINGLE_FIELDS = new Set([
-    "category", "author", "developer", "main", "port_map", "scheme", "index", "icon", "thumbnail",
+    "category", "author", "developer", "version", "updateAt", "website", "repo", "support", "docs",
+    "main", "port_map", "scheme", "index", "icon", "thumbnail",
   ]);
   const APP_META_UPDATABLE_FIELDS = new Set([
-    "title", "tagline", "description", "category", "author", "developer", "main", "port_map", "scheme", "index",
+    "title", "tagline", "description", "releaseNotes", "category", "author", "developer", "version",
+    "updateAt", "website", "repo", "support", "docs", "main", "port_map", "scheme", "index",
   ]);
   const SERVICE_FIELD_TYPES = new Set(["env", "port", "volume"]);
   const SERVICE_LIST_MAP = { env: "envs", port: "ports", volume: "volumes" };
@@ -161,4 +163,3 @@
   root.api.requestJSON = root.api.requestJSON || requestJSON;
   root.api.requestText = root.api.requestText || requestText;
 })();
-

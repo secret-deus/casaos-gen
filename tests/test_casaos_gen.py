@@ -61,6 +61,35 @@ class CasaOSParserTests(unittest.TestCase):
         self.assertEqual(meta.app.main, "web")
         self.assertEqual(meta.app.port_map, "8888")
 
+    def test_build_casaos_meta_infers_store_metadata_from_labels(self):
+        compose = {
+            "services": {
+                "web": {
+                    "image": "ghcr.io/example/demo:2.4.1",
+                    "ports": ["8080:80"],
+                    "labels": {
+                        "org.opencontainers.image.version": "2.4.1",
+                        "org.opencontainers.image.created": "2026-03-01T12:00:00Z",
+                        "org.opencontainers.image.url": "https://example.com",
+                        "org.opencontainers.image.source": "https://github.com/example/demo",
+                        "org.opencontainers.image.documentation": "https://docs.example.com/demo",
+                        "support": "https://github.com/example/demo/issues",
+                        "releaseNotes": "First stable release",
+                    },
+                }
+            }
+        }
+
+        meta = build_casaos_meta(compose)
+
+        self.assertEqual(meta.app.version, "2.4.1")
+        self.assertEqual(meta.app.updateAt, "2026-03-01")
+        self.assertEqual(meta.app.website, "https://example.com")
+        self.assertEqual(meta.app.repo, "https://github.com/example/demo")
+        self.assertEqual(meta.app.docs, "https://docs.example.com/demo")
+        self.assertEqual(meta.app.support, "https://github.com/example/demo/issues")
+        self.assertEqual(meta.app.releaseNotes, "First stable release")
+
     def test_apply_params_substitutes_store_folder_placeholders(self):
         meta = build_casaos_meta(self.compose)
         params = {
@@ -86,12 +115,16 @@ class CasaOSParserTests(unittest.TestCase):
                 "title": "  My App  ",
                 "tagline": "Great tagline\n",
                 "description": "Multi-line desc\n\nWith paragraphs\n",
+                "releaseNotes": "  Initial release  ",
+                "website": "  https://example.com/app  ",
             }
         }
         out = apply_params_to_meta(meta, params)
         self.assertEqual(out.app.title, "My App")
         self.assertEqual(out.app.tagline, "Great tagline")
         self.assertEqual(out.app.description, "Multi-line desc\n\nWith paragraphs")
+        self.assertEqual(out.app.releaseNotes, "Initial release")
+        self.assertEqual(out.app.website, "https://example.com/app")
 
 
 class CasaOSI18NTests(unittest.TestCase):
@@ -140,8 +173,15 @@ class CasaOSI18NTests(unittest.TestCase):
                 title="Sample",
                 tagline="Simple",
                 description="Sample app",
+                releaseNotes="First release",
                 category="Web Server",
                 author="me",
+                version="1.0.0",
+                updateAt="2026-03-01",
+                website="https://example.com",
+                repo="https://github.com/example/sample",
+                support="https://github.com/example/sample/issues",
+                docs="https://docs.example.com/sample",
                 main="web",
                 port_map="8080",
             ),
@@ -157,6 +197,10 @@ class CasaOSI18NTests(unittest.TestCase):
         self.assertIn("x-casaos", final)
         self.assertIn("x-casaos", final["services"]["web"])
         self.assertEqual(final["services"]["web"]["restart"], "unless-stopped")
+        self.assertEqual(final["x-casaos"]["releaseNotes"]["en_US"], "First release")
+        self.assertEqual(final["x-casaos"]["version"], "1.0.0")
+        self.assertEqual(final["x-casaos"]["updateAt"], "2026-03-01")
+        self.assertEqual(final["x-casaos"]["website"], "https://example.com")
         zh_desc = final["services"]["web"]["x-casaos"]["ports"][0]["description"]["zh_CN"]
         self.assertEqual(zh_desc, "主 Web 界面端口")
 
@@ -370,6 +414,8 @@ class CasaOSTemplateStageTests(unittest.TestCase):
         self.assertEqual(app["developer"], "fromxiaobai")
         self.assertIsInstance(app["title"], dict)
         self.assertEqual(app["tagline"]["zh_CN"], "Deep document RAG")
+        self.assertEqual(app["version"], "")
+        self.assertEqual(app["releaseNotes"]["en_US"], "")
 
         svc_x = out["services"]["web"]["x-casaos"]
         self.assertEqual(svc_x["ports"][0]["container"], "80")
@@ -387,6 +433,7 @@ class CasaOSTemplateStageTests(unittest.TestCase):
         self.assertEqual(params["app"]["developer"], "fromxiaobai")
         self.assertEqual(params["app"]["architectures"], ["amd64", "arm64"])
         self.assertEqual(params["app"]["author"], "owner")
+        self.assertEqual(params["app"]["version"], "")
         self.assertEqual(params["services"]["web"]["ports"][0]["container"], "80")
 
     def test_yaml_write_allows_unicode(self):

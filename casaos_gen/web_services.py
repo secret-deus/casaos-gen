@@ -417,7 +417,7 @@ def sync_meta_from_multilang_target(target: str, translations: Dict[str, str], s
     english_text = str(translations.get("en_US") or "").strip()
     if not english_text:
         return
-    if target in {"app.title", "app.tagline", "app.description"}:
+    if target in {"app.title", "app.tagline", "app.description", "app.releaseNotes"}:
         setattr(meta.app, target.split(".", 1)[1], english_text)
         return
     parts = target.split(":")
@@ -445,12 +445,26 @@ def seed_meta_from_existing_compose(meta: CasaOSMeta, compose_data: Dict[str, An
     if not isinstance(app_block, dict):
         return
 
-    for fld in ("title", "tagline", "description"):
+    for fld in ("title", "tagline", "description", "releaseNotes"):
         text = as_text(app_block.get(fld)).strip()
         if text:
             setattr(meta.app, fld, text)
 
-    for fld in ("category", "author", "developer", "main", "port_map", "scheme", "index"):
+    for fld in (
+        "category",
+        "author",
+        "developer",
+        "version",
+        "updateAt",
+        "website",
+        "repo",
+        "support",
+        "docs",
+        "main",
+        "port_map",
+        "scheme",
+        "index",
+    ):
         value = app_block.get(fld)
         if value is None:
             continue

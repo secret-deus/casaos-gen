@@ -23,7 +23,19 @@ from .exceptions import ComposeParseError, ParamsError
 
 from .constants import CDN_BASE, STORE_FOLDER_PLACEHOLDER
 from .i18n import DEFAULT_LANGUAGES
-from .infer import infer_author, infer_category, infer_main_port, infer_main_service
+from .infer import (
+    infer_author,
+    infer_category,
+    infer_docs,
+    infer_main_port,
+    infer_main_service,
+    infer_release_notes,
+    infer_repo,
+    infer_support,
+    infer_update_at,
+    infer_version,
+    infer_website,
+)
 from .parser import build_xcasaos_template, extract_envs, extract_ports, extract_volumes
 
 logger = logging.getLogger(__name__)
@@ -81,6 +93,13 @@ def build_template_compose(
     inferred_port_map = infer_main_port(services.get(main_service, {}))
     inferred_category = infer_category(services, preferred_service=main_service)
     inferred_author = infer_author(services, preferred_service=main_service)
+    inferred_version = infer_version(services, preferred_service=main_service)
+    inferred_update_at = infer_update_at(services, preferred_service=main_service)
+    inferred_release_notes = infer_release_notes(services, preferred_service=main_service)
+    inferred_website = infer_website(services, preferred_service=main_service)
+    inferred_repo = infer_repo(services, preferred_service=main_service)
+    inferred_support = infer_support(services, preferred_service=main_service)
+    inferred_docs = infer_docs(services, preferred_service=main_service)
 
     app_name = str(compose_data.get("name") or main_service or "")
     store_folder = str(params_app.get("store_folder") or "<store_folder>")
@@ -122,11 +141,13 @@ def build_template_compose(
     title = params_app.get("title") or app_name
     tagline = params_app.get("tagline") or ""
     description = params_app.get("description") or ""
+    release_notes = params_app.get("releaseNotes") or inferred_release_notes or ""
 
     app_block: Dict[str, Any] = {
         "title": title,
         "tagline": tagline,
         "description": description,
+        "releaseNotes": release_notes,
         "category": category,
         "author": author,
         "developer": developer,
@@ -134,6 +155,12 @@ def build_template_compose(
         "icon": icon,
         "thumbnail": thumbnail,
         "screenshot_link": screenshot_links,
+        "version": str(params_app.get("version") or inferred_version or ""),
+        "updateAt": str(params_app.get("updateAt") or inferred_update_at or ""),
+        "website": str(params_app.get("website") or inferred_website or ""),
+        "repo": str(params_app.get("repo") or inferred_repo or ""),
+        "support": str(params_app.get("support") or inferred_support or ""),
+        "docs": str(params_app.get("docs") or inferred_docs or ""),
         "main": str(params_app.get("main") or main_service),
         "port_map": str(params_app.get("port_map") or inferred_port_map or ""),
         "scheme": str(params_app.get("scheme") or "http"),
@@ -175,6 +202,13 @@ def build_params_skeleton(compose_data: Dict[str, Any]) -> Dict[str, Any]:
     inferred_port_map = infer_main_port(services.get(main_service, {}))
     inferred_category = infer_category(services, preferred_service=main_service)
     inferred_author = infer_author(services, preferred_service=main_service)
+    inferred_version = infer_version(services, preferred_service=main_service)
+    inferred_update_at = infer_update_at(services, preferred_service=main_service)
+    inferred_release_notes = infer_release_notes(services, preferred_service=main_service)
+    inferred_website = infer_website(services, preferred_service=main_service)
+    inferred_repo = infer_repo(services, preferred_service=main_service)
+    inferred_support = infer_support(services, preferred_service=main_service)
+    inferred_docs = infer_docs(services, preferred_service=main_service)
     app_name = str(compose_data.get("name") or main_service or "")
 
     params: Dict[str, Any] = {
@@ -186,7 +220,14 @@ def build_params_skeleton(compose_data: Dict[str, Any]) -> Dict[str, Any]:
             "title": app_name,
             "tagline": "",
             "description": "",
+            "releaseNotes": inferred_release_notes,
             "category": inferred_category,
+            "version": inferred_version,
+            "updateAt": inferred_update_at,
+            "website": inferred_website,
+            "repo": inferred_repo,
+            "support": inferred_support,
+            "docs": inferred_docs,
             "main": main_service,
             "port_map": inferred_port_map,
             "scheme": "http",

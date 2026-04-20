@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 HTTP_FRIENDLY_PORTS = {"80", "443", "8080", "8000", "3000", "5000"}
 PREFERRED_SERVICE_NAMES = ["web", "frontend", "app", "server", "service"]
 _PORT_VAR_DEFAULT_RE = re.compile(r"^\$\{[^}:]+(?:(?::-)|-)(\d+)\}$")
+_DATE_RE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
 
 CATEGORY_RULES = {
     "mysql": "Database",
@@ -28,6 +29,82 @@ CATEGORY_RULES = {
     "immich": "Photos",
     "wordpress": "Web Server",
 }
+
+
+def _iter_service_candidates(services: Dict[str, Dict], preferred_service: Optional[str] = None) -> Iterable[Dict]:
+    if preferred_service and preferred_service in services:
+        preferred = services.get(preferred_service)
+        if isinstance(preferred, dict):
+            yield preferred
+    for name, service in services.items():
+        if name == preferred_service or not isinstance(service, dict):
+            continue
+        yield service
+
+
+def _normalize_labels(raw_labels: object) -> Dict[str, str]:
+    labels: Dict[str, str] = {}
+    if isinstance(raw_labels, dict):
+        items = raw_labels.items()
+    elif isinstance(raw_labels, list):
+        items = []
+        for entry in raw_labels:
+            if isinstance(entry, str) and "=" in entry:
+                key, value = entry.split("=", 1)
+                items.append((key, value))
+            elif isinstance(entry, dict):
+                items.extend(entry.items())
+    else:
+        return labels
+
+    for key, value in items:
+        key_text = str(key).strip().lower()
+        value_text = str(value).strip()
+        if key_text and value_text:
+            labels[key_text] = value_text
+    return labels
+
+
+def _first_label_value(
+    services: Dict[str, Dict],
+    label_keys: Iterable[str],
+    preferred_service: Optional[str] = None,
+) -> str:
+    normalized_keys = [str(key).strip().lower() for key in label_keys if str(key).strip()]
+    for service in _iter_service_candidates(services, preferred_service=preferred_service):
+        labels = _normalize_labels(service.get("labels"))
+        if not labels:
+            continue
+        for key in normalized_keys:
+            value = labels.get(key)
+            if value:
+                return value
+    return ""
+
+
+def _extract_image_tag(image: str) -> str:
+    cleaned = str(image or "").strip()
+    if not cleaned:
+        return ""
+    without_digest = cleaned.split("@", 1)[0]
+    last_slash = without_digest.rfind("/")
+    last_colon = without_digest.rfind(":")
+    if last_colon <= last_slash:
+        return ""
+    tag = without_digest[last_colon + 1 :].strip()
+    if not tag or tag.lower() == "latest":
+        return ""
+    return tag
+
+
+def _extract_date(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = _DATE_RE.search(text)
+    if match:
+        return match.group(0)
+    return text
 
 
 def normalize_port_value(value: Optional[str]) -> Optional[str]:
@@ -206,3 +283,79 @@ def infer_author(services: Dict[str, Dict], preferred_service: Optional[str] = N
             if author:
                 return author
     return "CasaOS User"
+
+
+def infer_version(services: Dict[str, Dict], preferred_service: Optional[str] = None) -> str:
+    version = _first_label_value(
+        services,
+        ["org.opencontainers.image.version", "org.label-schema.version", "version"],
+        preferred_service=preferred_service,
+    )
+    if version:
+        return version
+    for service in _iter_service_candidates(services, preferred_service=preferred_service):
+        tag = _extract_image_tag(service.get("image") or "")
+        if tag:
+            return tag
+    return ""
+
+
+def infer_update_at(services: Dict[str, Dict], preferred_service: Optional[str] = None) -> str:
+    value = _first_label_value(
+        services,
+        [
+            "org.opencontainers.image.created",
+            "org.label-schema.build-date",
+            "updateat",
+            "updated_at",
+            "build-date",
+        ],
+        preferred_service=preferred_service,
+    )
+    return _extract_date(value)
+
+
+def infer_release_notes(services: Dict[str, Dict], preferred_service: Optional[str] = None) -> str:
+    return _first_label_value(
+        services,
+        [
+            "org.opencontainers.image.release-notes",
+            "org.opencontainers.image.releasenotes",
+            "releasenotes",
+            "release_notes",
+            "changelog",
+        ],
+        preferred_service=preferred_service,
+    )
+
+
+def infer_website(services: Dict[str, Dict], preferred_service: Optional[str] = None) -> str:
+    return _first_label_value(
+        services,
+        ["org.opencontainers.image.url", "homepage", "website", "url"],
+        preferred_service=preferred_service,
+    )
+
+
+def infer_repo(services: Dict[str, Dict], preferred_service: Optional[str] = None) -> str:
+    return _first_label_value(
+        services,
+        ["org.opencontainers.image.source", "repository", "repo", "source"],
+        preferred_service=preferred_service,
+    )
+
+
+def infer_support(services: Dict[str, Dict], preferred_service: Optional[str] = None) -> str:
+    return _first_label_value(
+        services,
+        ["support", "support_url", "issues", "bugtracker"],
+        preferred_service=preferred_service,
+    )
+
+
+def infer_docs(services: Dict[str, Dict], preferred_service: Optional[str] = None) -> str:
+    return _first_label_value(
+        services,
+        ["org.opencontainers.image.documentation", "documentation", "docs"],
+        preferred_service=preferred_service,
+    )

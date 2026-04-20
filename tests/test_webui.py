@@ -59,6 +59,7 @@ class TestGetState(unittest.TestCase):
         self.assertFalse(data["has_compose"])
         self.assertFalse(data["has_meta"])
         self.assertIsNone(data["meta"])
+        self.assertEqual(data["compose_text"], "")
 
     def test_api_key_is_masked(self):
         """API key must never be returned as a string."""
@@ -107,6 +108,33 @@ class TestLoadCompose(unittest.TestCase):
         self.assertEqual(data["status"], "ok")
         self.assertEqual(data["meta"]["app"]["main"], "web")
 
+    def test_load_compose_seeds_new_app_fields_from_x_casaos(self):
+        compose = """services:
+  web:
+    image: nginx:latest
+    ports:
+      - '8080:80'
+x-casaos:
+  releaseNotes:
+    en_US: First release
+  version: '1.0.0'
+  updateAt: '2026-03-01'
+  website: https://example.com
+  repo: https://github.com/example/app
+  support: https://github.com/example/app/issues
+  docs: https://docs.example.com/app
+"""
+        resp = self.client.post("/api/compose-text", json={"text": compose})
+        self.assertEqual(resp.status_code, 200)
+        app = resp.json()["meta"]["app"]
+        self.assertEqual(app["releaseNotes"], "First release")
+        self.assertEqual(app["version"], "1.0.0")
+        self.assertEqual(app["updateAt"], "2026-03-01")
+        self.assertEqual(app["website"], "https://example.com")
+        self.assertEqual(app["repo"], "https://github.com/example/app")
+        self.assertEqual(app["support"], "https://github.com/example/app/issues")
+        self.assertEqual(app["docs"], "https://docs.example.com/app")
+
     def test_load_compose_text_empty_fails(self):
         resp = self.client.post("/api/compose-text", json={"text": ""})
         self.assertEqual(resp.status_code, 400)
@@ -128,6 +156,19 @@ class TestLoadCompose(unittest.TestCase):
         self.assertTrue(data["has_compose"])
         self.assertTrue(data["has_meta"])
         self.assertIsNotNone(data["meta"])
+        self.assertEqual(data["compose_text"], self.valid_compose)
+
+    def test_reset_clears_session_state(self):
+        self.client.post(
+            "/api/compose-text",
+            json={"text": self.valid_compose},
+        )
+        resp = self.client.post("/api/reset")
+        self.assertEqual(resp.status_code, 200)
+        state = self.client.get("/api/state").json()
+        self.assertFalse(state["has_compose"])
+        self.assertFalse(state["has_meta"])
+        self.assertEqual(state["compose_text"], "")
 
 
 class TestMetaFill(unittest.TestCase):
@@ -155,6 +196,9 @@ class TestMetaFill(unittest.TestCase):
                 "title": "MyNginx",
                 "tagline": "Fast proxy",
                 "category": "Web Server",
+                "releaseNotes": "Initial release",
+                "version": "1.0.0",
+                "website": "https://example.com",
             }
         })
         resp = self.client.post(
@@ -165,6 +209,9 @@ class TestMetaFill(unittest.TestCase):
         data = resp.json()
         self.assertEqual(data["meta"]["app"]["title"], "MyNginx")
         self.assertEqual(data["meta"]["app"]["tagline"], "Fast proxy")
+        self.assertEqual(data["meta"]["app"]["releaseNotes"], "Initial release")
+        self.assertEqual(data["meta"]["app"]["version"], "1.0.0")
+        self.assertEqual(data["meta"]["app"]["website"], "https://example.com")
 
     def test_fill_with_invalid_params_json(self):
         resp = self.client.post(

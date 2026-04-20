@@ -37,6 +37,7 @@ class AppMeta(BaseModel):
     title: str = ""
     tagline: str = ""
     description: str = ""
+    releaseNotes: str = ""
     category: str
     author: str
     developer: str = "fromxiaobai"
@@ -46,6 +47,12 @@ class AppMeta(BaseModel):
     icon: str = ""
     thumbnail: str = ""
     screenshot_link: List[str] = Field(default_factory=list)
+    version: str = ""
+    updateAt: str = ""
+    website: str = ""
+    repo: str = ""
+    support: str = ""
+    docs: str = ""
     index: str = "/"
     scheme: str = "http"
 

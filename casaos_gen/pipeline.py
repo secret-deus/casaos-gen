@@ -80,9 +80,16 @@ def apply_params_to_meta(meta: CasaOSMeta, params: Optional[Dict[str, Any]]) -> 
         _apply_text_field(meta, "title", app_params.get("title"))
         _apply_text_field(meta, "tagline", app_params.get("tagline"))
         _apply_text_field(meta, "description", app_params.get("description"))
+        _apply_text_field(meta, "releaseNotes", app_params.get("releaseNotes"))
         _apply_text_field(meta, "category", app_params.get("category"))
         _apply_text_field(meta, "author", app_params.get("author"))
         _apply_text_field(meta, "developer", app_params.get("developer"))
+        _apply_text_field(meta, "version", app_params.get("version"))
+        _apply_text_field(meta, "updateAt", app_params.get("updateAt"))
+        _apply_text_field(meta, "website", app_params.get("website"))
+        _apply_text_field(meta, "repo", app_params.get("repo"))
+        _apply_text_field(meta, "support", app_params.get("support"))
+        _apply_text_field(meta, "docs", app_params.get("docs"))
         _apply_text_field(meta, "main", app_params.get("main"))
         _apply_text_field(meta, "port_map", app_params.get("port_map"))
         _apply_text_field(meta, "scheme", app_params.get("scheme"))
@@ -227,7 +234,7 @@ def _seed_translation_map_from_compose(
 
     app_x = compose_data.get("x-casaos")
     if isinstance(app_x, dict):
-        for field in ("title", "tagline", "description"):
+        for field in ("title", "tagline", "description", "releaseNotes"):
             ingest_multilang(app_x.get(field))
         tips = app_x.get("tips")
         if isinstance(tips, dict):
@@ -259,7 +266,7 @@ def _collect_stage2_texts(
 ) -> List[str]:
     texts: List[str] = []
     app = meta.app
-    for field in ("title", "tagline", "description"):
+    for field in ("title", "tagline", "description", "releaseNotes"):
         value = getattr(app, field, "")
         if str(value).strip():
             texts.append(str(value).strip())

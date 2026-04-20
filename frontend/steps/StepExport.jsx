@@ -100,6 +100,7 @@
       { id: "app.title|multi", label: "app.title", target: "app.title", multilang: true },
       { id: "app.tagline|multi", label: "app.tagline", target: "app.tagline", multilang: true },
       { id: "app.description|multi", label: "app.description", target: "app.description", multilang: true },
+      { id: "app.releaseNotes|multi", label: "app.releaseNotes", target: "app.releaseNotes", multilang: true },
       { id: "app.tips.before_install|multi", label: "app.tips.before_install", target: "app.tips.before_install", multilang: true },
       { id: "app.tips.after_install|multi", label: "app.tips.after_install", target: "app.tips.after_install", multilang: true },
     ];
@@ -107,6 +108,12 @@
     const appPresetsSingle = [
       { id: "app.category|single", label: "app.category", target: "app.category", multilang: false },
       { id: "app.author|single", label: "app.author", target: "app.author", multilang: false },
+      { id: "app.version|single", label: "app.version", target: "app.version", multilang: false },
+      { id: "app.updateAt|single", label: "app.updateAt", target: "app.updateAt", multilang: false },
+      { id: "app.website|single", label: "app.website", target: "app.website", multilang: false },
+      { id: "app.repo|single", label: "app.repo", target: "app.repo", multilang: false },
+      { id: "app.support|single", label: "app.support", target: "app.support", multilang: false },
+      { id: "app.docs|single", label: "app.docs", target: "app.docs", multilang: false },
       { id: "app.main|single", label: "app.main", target: "app.main", multilang: false },
       { id: "app.port_map|single", label: "app.port_map", target: "app.port_map", multilang: false },
       { id: "app.scheme|single", label: "app.scheme", target: "app.scheme", multilang: false },
